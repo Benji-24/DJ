@@ -1,5 +1,5 @@
 import { db } from './db.js';
-import { analyzeBuffer } from './analyze.js';
+import { analyzeBuffer, ANALYSIS_VERSION } from './analyze.js';
 import { Engine } from './engine.js';
 import { isVideo, extractAudio } from './convert.js';
 
@@ -16,6 +16,7 @@ const state = {
   search: '',
 };
 window.__state = state;
+window.__app = { getBuffer: id => getBuffer(id), playIndex: i => playIndex(i) };
 
 const $ = s => document.querySelector(s);
 const esc = s => String(s ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
@@ -63,11 +64,41 @@ async function getBuffer(id) {
     if (!blob) throw new Error('Fichier introuvable');
     const ab = await blob.arrayBuffer();
     engine.init();
-    return await engine.ctx.decodeAudioData(ab);
+    const buf = await engine.ctx.decodeAudioData(ab);
+    await upgradeAnalysis(id, buf);
+    return buf;
   })();
   cache.set(id, p);
   try { return await p; } catch (e) { cache.delete(id); throw e; }
 }
+// Ancienne analyse ? on la refait avec le nouveau moteur
+async function upgradeAnalysis(id, buf) {
+  const t = state.tracks.get(id);
+  if (!t || t.v === ANALYSIS_VERSION) return;
+  const a = analyzeBuffer(buf);
+  Object.assign(t, a);
+  await db.putTrack(t);
+}
+async function migrateLibrary() {
+  const old = [...state.tracks.values()].filter(t => t.v !== ANALYSIS_VERSION);
+  if (!old.length) return;
+  const st = $('#importStatus');
+  for (let i = 0; i < old.length; i++) {
+    const t = old[i];
+    if (t.v === ANALYSIS_VERSION) continue;
+    st.textContent = `Nouvelle analyse (tempo, tonalité, phrases) ${i + 1}/${old.length}…`;
+    try {
+      const blob = await db.getBlob(t.id);
+      engine.init();
+      const buf = await engine.ctx.decodeAudioData(await blob.arrayBuffer());
+      await upgradeAnalysis(t.id, buf);
+    } catch (e) { console.error(e); }
+    renderLibrary(); renderQueue();
+    await new Promise(r => setTimeout(r, 30));
+  }
+  st.textContent = '';
+}
+
 function trimCache() {
   const keep = new Set([state.queue[state.qi], state.queue[state.qi + 1], state.queue[state.qi + 2]]);
   if (engine.cur) keep.add(engine.cur.track.id);
@@ -232,10 +263,16 @@ $('#fileInput').addEventListener('change', e => {
 });
 
 // ---------- Rendu ----------
+const hueOf = str => { let h = 0; for (const c of String(str)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
+const artOf = t => { const h = hueOf(t.artist || t.title); return `linear-gradient(135deg, hsl(${h} 85% 58%), hsl(${(h + 60) % 360} 80% 40%))`; };
+const keyHue = cam => cam ? ((parseInt(cam) - 1) * 30 + (cam.endsWith('B') ? 12 : 0)) % 360 : 0;
+const keyBadge = t => t.camelot ? `<span class="badge key" style="--h:${keyHue(t.camelot)}">${t.camelot}</span>` : '';
 function trackRow(t, extra = '', cls = '') {
+  const pending = t.v !== ANALYSIS_VERSION;
   return `<div class="row ${cls}" data-id="${t.id}">
-    <div class="info"><div class="t">${esc(t.title)}</div><div class="a">${esc(t.artist || '—')} · ${fmt(t.duration)}</div></div>
-    <span class="bpm">${Math.round(t.bpm)}</span>${extra}</div>`;
+    <div class="art" style="--art:${artOf(t)}"></div>
+    <div class="info"><div class="t">${esc(t.title)}</div><div class="a">${esc(t.artist || 'Artiste inconnu')} · ${fmt(t.duration)}</div></div>
+    <div class="meta"><span class="bpm">${pending ? '…' : Math.round(t.bpm) + ' BPM'}</span>${pending ? '' : keyBadge(t)}</div>${extra}</div>`;
 }
 
 function renderQueue() {
@@ -254,8 +291,8 @@ function renderQueue() {
     const t = state.tracks.get(id); if (!t) return;
     const idx = state.qi + 1 + k;
     const locked = engine.committed && k === 0;
-    h += trackRow(t, locked ? `<span class="act hot">Arrive</span>` :
-      `<button class="act hot" data-now="${idx}">⚡ Maintenant</button><button class="icon-btn" data-rm="${idx}">✕</button>`);
+    h += trackRow(t, locked ? `<span class="act cool">Entre</span>` :
+      `<button class="act hot" data-now="${idx}">⚡</button><button class="icon-btn" data-rm="${idx}">✕</button>`, locked ? 'incoming' : '');
   });
   const played = q.slice(0, Math.max(0, state.qi)).slice(-5);
   if (played.length) {
@@ -386,58 +423,169 @@ function playlistContent(p) {
   sheet(p.name + ' — toucher pour retirer', items);
 }
 
-// ---------- Platine (affichage en direct) ----------
-const canvas = $('#wave'), g = canvas.getContext('2d');
-function drawWave() {
+// ---------- Platines, formes d'onde et IA (affichage en direct) ----------
+const canvas = $('#scope'), g = canvas.getContext('2d');
+const DECK_COL = { A: [255, 46, 136], B: [46, 230, 214] };
+
+// Qui est sur quelle platine ?
+function deckState() {
+  const res = { A: null, B: null };
+  for (const v of [engine.cur, engine.inc]) if (v) res[v.deck] = { v, t: v.track, role: v === engine.cur && !engine.inc ? 'live' : v === engine.inc ? 'in' : 'out' };
+  const nextId = state.queue[state.qi + 1];
+  const nt = state.tracks.get(nextId);
+  if (engine.cur && !engine.inc && nt) {
+    const other = engine.cur.deck === 'A' ? 'B' : 'A';
+    res[other] = { v: null, t: nt, role: 'next' };
+  }
+  if (!engine.cur && state.queue.length) {
+    const t = state.tracks.get(state.queue[Math.max(0, state.qi)]);
+    if (t) res.A = { v: null, t, role: 'ready' };
+  }
+  return res;
+}
+
+function renderDeckCard(letter, d) {
+  const el = document.getElementById('deck' + letter);
+  const tag = { live: 'EN COURS', in: 'ENTRE', out: 'SORT', next: 'SUIVANT', ready: 'PRÊT' }[d?.role] || 'VIDE';
+  el.querySelector('.deck-tag').textContent = `${letter} · ${tag}`;
+  el.querySelector('.deck-title').textContent = d ? d.t.title : '—';
+  el.querySelector('.deck-artist').textContent = d ? (d.t.artist || 'Artiste inconnu') : (letter === 'A' ? 'Importe tes musiques' : 'Ajoute une musique');
+  el.querySelector('.vinyl-label').style.setProperty('--lab', d ? `hsl(${hueOf(d.t.artist || d.t.title)} 85% 58%)` : '');
+  const live = d && d.v;
+  el.classList.toggle('live', !!live);
+  el.classList.toggle('idle', !d);
+  el.classList.toggle('spinning', !!live && !engine.paused);
+  let b = '';
+  if (d && d.t.v === ANALYSIS_VERSION) {
+    const rate = live ? d.v.rateAt(engine.now) : (d.role === 'next' && engine.plan ? engine.plan.r : 1);
+    const bpm = d.t.bpm * rate;
+    b += `<span class="badge">${bpm.toFixed(Math.abs(rate - 1) > 0.002 ? 1 : 0)} BPM</span>` + keyBadge(d.t);
+    if (live) b += `<span class="badge time">-${fmt(d.t.duration - d.v.posAt(engine.now))}</span>`;
+  }
+  const box = el.querySelector('.deck-badges');
+  if (box.innerHTML !== b) box.innerHTML = b;
+}
+
+function waveCol(t, pos) {
+  const w = t.wave; if (!w) return null;
+  const i = Math.floor(pos * w.fps);
+  if (i < 0 || i >= w.low.length) return null;
+  return [w.low[i] / 255, w.mid[i] / 255, w.high[i] / 255];
+}
+
+function drawLane(y0, h, letter, d, now, cx, pps, w) {
+  const col = DECK_COL[letter];
+  const mid = y0 + h / 2;
+  g.fillStyle = `rgba(${col},0.05)`; g.fillRect(0, y0, w, h);
+  if (!d) return;
+  const t = d.t;
+  let posAt, startT;
+  if (d.v) { posAt = x => d.v.posAt(x); startT = d.v.str ? d.v.str.when : d.v.lin.t; }
+  else if (d.role === 'next' && engine.plan) { const p = engine.plan; posAt = x => p.inPos + (x - p.T0) * p.r; startT = p.T0; }
+  else return;
+  if (t.v !== ANALYSIS_VERSION) return;
+  const P = 60 / t.bpm, bar = 4 * P, ph = 32 * P;
+  let lb = null, lbar = null, lph = null;
+  for (let x = 0; x < w; x += 2) {
+    const tt = now + (x - cx) / pps;
+    if (tt < startT) { lb = lbar = lph = null; continue; }
+    const pos = posAt(tt);
+    const v = waveCol(t, pos);
+    if (!v) continue;
+    const past = x < cx;
+    const a = past ? 0.38 : 1;
+    const hl = v[0] * h * 0.46, hm = v[1] * h * 0.40, hh = v[2] * h * 0.30;
+    g.fillStyle = `rgba(${col},${0.9 * a})`; g.fillRect(x, mid - hl, 2, hl * 2);
+    g.fillStyle = `rgba(255,200,87,${0.8 * a})`; g.fillRect(x, mid - hm, 2, hm * 2);
+    g.fillStyle = `rgba(255,255,255,${0.85 * a})`; g.fillRect(x, mid - hh, 2, hh * 2);
+    if (t.conf >= 1.25) {
+      const bi = Math.floor((pos - t.beat) / P), ba = Math.floor((pos - t.bar) / bar), pi = Math.floor((pos - t.phrase) / ph);
+      if (lb !== null && bi !== lb) {
+        const isBar = ba !== lbar, isPh = pi !== lph;
+        g.fillStyle = isPh ? 'rgba(255,255,255,0.95)' : isBar ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.16)';
+        const th = isPh ? h : isBar ? h * 0.5 : h * 0.22;
+        g.fillRect(x, y0 + (isPh ? 0 : 0), isPh ? 2 : 1, isPh ? h : th * 0.5);
+        g.fillRect(x, y0 + h - (isPh ? 0 : th * 0.5), isPh ? 2 : 1, isPh ? 0 : th * 0.5);
+      }
+      lb = bi; lbar = ba; lph = pi;
+    }
+  }
+  // zone de mix prévue
+  if (d.v && d.v === engine.cur && engine.plan && !engine.inc) {
+    const p = engine.plan;
+    const x0 = cx + (p.T0 - now) * pps;
+    const len = p.mixBeats ? p.mixBeats * P / d.v.rateAt(now) : (p.type === 'fade' ? 8 : 2 * P);
+    const x1 = x0 + len * pps;
+    if (x1 > 0 && x0 < w) {
+      g.fillStyle = 'rgba(139,92,246,0.22)'; g.fillRect(x0, y0, x1 - x0, h);
+      g.fillStyle = '#8b5cf6'; g.fillRect(x0, y0, 2, h);
+      g.font = '700 10px "Space Grotesk", sans-serif'; g.fillStyle = '#c4b5fd';
+      g.fillText('MIX', x0 + 5, y0 + 12);
+    }
+  }
+  g.font = '700 10px "Space Grotesk", sans-serif'; g.fillStyle = `rgb(${col})`;
+  g.fillText(letter, 8, y0 + 13);
+}
+
+function drawScope() {
   const dpr = window.devicePixelRatio || 1;
   const w = canvas.clientWidth, h = canvas.clientHeight;
   if (canvas.width !== Math.round(w * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
   g.setTransform(dpr, 0, 0, dpr, 0, 0);
   g.clearRect(0, 0, w, h);
-  const v = engine.cur;
-  const t = v?.track;
-  const peaks = t?.peaks || new Array(160).fill(6);
-  const prog = v ? Math.min(1, Math.max(0, v.posAt(engine.now) / t.duration)) : 0;
-  const n = peaks.length, bw = w / n;
-  const grad = g.createLinearGradient(0, 0, w, 0);
-  grad.addColorStop(0, '#ff2e88'); grad.addColorStop(.55, '#a855f7'); grad.addColorStop(1, '#22d3ee');
-  for (let i = 0; i < n; i++) {
-    const ph = Math.max(2, (peaks[i] / 100) * (h - 4));
-    g.fillStyle = (i / n) < prog ? grad : '#34344a';
-    g.fillRect(i * bw + 0.5, (h - ph) / 2, Math.max(1, bw - 1.5), ph);
+  const now = engine.now;
+  const ds = deckState();
+  const cx = Math.round(w * 0.38), pps = 72, lane = (h - 6) / 2;
+  drawLane(0, lane, 'A', ds.A, now, cx, pps, w);
+  drawLane(lane + 6, lane, 'B', ds.B, now, cx, pps, w);
+  g.fillStyle = '#fff'; g.fillRect(cx - 1, 0, 2, h);
+  g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(cx - 5, 0, 10, 2); g.fillRect(cx - 5, h - 2, 10, 2);
+}
+
+const MIXNAME = { blend: 'Blend', quick: 'Mix court', echo: 'Écho', fade: 'Fondu', filter: 'Montée', loop: 'Boucle', brake: 'Frein' };
+let lastAi = '';
+function renderAI() {
+  const ai = $('#ai');
+  let st = 'en attente', text = '', chips = [], busy = false;
+  const p = engine.plan, cur = engine.cur;
+  const nt = state.tracks.get(state.queue[state.qi + 1]);
+  if (!state.tracks.size) text = 'Importe tes musiques dans la Bibliothèque.';
+  else if (!cur) text = state.queue.length ? 'Prêt. Appuie sur lecture pour lancer le set.' : 'Lance une playlist ou toute ta bibliothèque.';
+  else if (engine.inc) {
+    st = 'mixe'; busy = true;
+    text = `${MIXNAME[engine.lastKind] || 'Transition'} en cours → <b>${esc(engine.inc.track.title)}</b>`;
+  } else if (!nt) { st = 'à l\'écoute'; text = 'Ajoute une musique à la suite : je prépare la transition.'; }
+  else if (!p || nt.v !== ANALYSIS_VERSION) { st = 'analyse'; busy = true; text = `J'analyse « ${esc(nt.title)} »…`; }
+  else {
+    st = p.ready ? 'prêt' : 'calage du tempo…';
+    busy = !p.ready;
+    text = `${p.reason} dans <span class="count">${fmt(p.T0 - engine.now)}</span>`;
+    const o = cur.track;
+    chips.push([`${Math.round(o.bpm)} → ${Math.round(nt.bpm)} BPM`, p.tempoOk ? 'ok' : 'no']);
+    if (o.camelot && nt.camelot) chips.push([`${o.camelot} → ${nt.camelot}`, p.keyOk ? 'ok' : 'no']);
+    if (p.tempoOk && Math.abs(p.r - 1) > 0.003) chips.push([`tempo calé ${(p.r - 1) * 100 > 0 ? '+' : ''}${((p.r - 1) * 100).toFixed(1)} %`, 'ok']);
+    chips.push([{ blend: 'échange des basses', quick: '4 mesures', echo: 'écho 3/4', fade: '8 s' }[p.type], '']);
   }
-  if (v && engine.plan) {
-    const mx = v.posAt(engine.plan.T0) / t.duration * w;
-    g.fillStyle = '#a3e635'; g.fillRect(mx, 0, 2, h);
-  }
-  if (v) { g.fillStyle = '#fff'; g.fillRect(prog * w - 1, 0, 2, h); }
+  const html = `${st}|${text}|${chips.map(c => c.join(':')).join(',')}`;
+  ai.classList.toggle('busy', busy);
+  if (html === lastAi) return;
+  lastAi = html;
+  $('#aiState').textContent = st;
+  $('#aiText').innerHTML = text;
+  $('#aiChips').innerHTML = chips.map(([l, c]) => `<span class="ai-chip ${c}">${l}</span>`).join('');
 }
 
 function renderDeck() {
-  const v = engine.cur, t = v?.track;
-  $('#nowTitle').textContent = t ? t.title : 'Aucune musique';
-  if (t) {
-    const bpm = Math.round(t.bpm * v.rate);
-    $('#nowMeta').textContent = `${t.artist || 'Artiste inconnu'} · ${bpm} BPM · ${fmt(v.posAt(engine.now))} / ${fmt(t.duration)}`;
-  } else {
-    $('#nowMeta').textContent = state.tracks.size ? 'Lance une playlist ou touche une musique' : 'Importe tes musiques (MP3, MKV…) dans la Bibliothèque pour commencer';
-  }
-  const nextId = state.queue[state.qi + 1];
-  const nt = state.tracks.get(nextId);
-  let line = '';
-  if (engine.committed && engine.inc) line = `<span class="live">● Transition</span> → <b>${esc(engine.inc.track.title)}</b>`;
-  else if (t && nt) {
-    const p = engine.plan;
-    line = `Ensuite : <b>${esc(nt.title)}</b>` + (p ? ` · mix auto dans ${fmt(p.T0 - engine.now)}` : ' · préparation…');
-  } else if (t) line = 'Rien à la suite — ajoute une musique avec « Ensuite »';
-  $('#nextLine').innerHTML = line;
-  const playing = !!t;
+  const ds = deckState();
+  renderDeckCard('A', ds.A); renderDeckCard('B', ds.B);
+  const playing = !!engine.cur;
   $('#btnPlayPause').disabled = !playing && !state.queue.length;
   $('#btnPlayPause').classList.toggle('playing', playing && !engine.paused);
   $('#btnRemix').disabled = !playing;
-  drawWave();
+  renderAI();
 }
-setInterval(renderDeck, 200);
+setInterval(renderDeck, 250);
+(function loop() { if (document.visibilityState === 'visible') drawScope(); requestAnimationFrame(loop); })();
 
 function renderAll() { renderDeck(); renderQueue(); renderLibrary(); renderPlaylists(); }
 
@@ -458,9 +606,22 @@ document.querySelector('.pads').addEventListener('click', e => {
   const fx = b.dataset.fx;
   if (fx === 'echo') { engine.echoThrow(); b.classList.remove('flash'); void b.offsetWidth; b.classList.add('flash'); return; }
   const on = !b.classList.contains('on');
-  engine[fx](on);
+  const r = engine[fx](on);
+  if (fx === 'loop' && r === false) return toast('Boucle possible juste après la transition');
   b.classList.toggle('on', on);
 });
+
+// Durée jouée de chaque morceau : Entier / Club (~2:30) / Express (~1:15)
+function setMode(m) {
+  state.mode = m; store.set('dj-mode', m); engine.setMode(m);
+  document.querySelectorAll('#modeSeg button').forEach(b => b.classList.toggle('on', b.dataset.mode === m));
+}
+$('#modeSeg').addEventListener('click', e => {
+  const b = e.target.closest('button'); if (!b) return;
+  setMode(b.dataset.mode);
+  toast({ full: 'Morceaux en entier', club: 'Mode Club : ~2 min 30 par morceau', express: 'Mode Express : ~1 min 15 par morceau' }[b.dataset.mode]);
+});
+engine.on('plan', () => { lastAi = ''; });
 
 function switchTab(tab) {
   state.tab = tab;
@@ -478,6 +639,7 @@ splash && splash.addEventListener('click', hideSplash);
 
 (async function boot() {
   state.style = store.get('dj-style', 'auto');
+  setMode(store.get('dj-mode', 'club'));
   document.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c.dataset.style === state.style));
   try {
     const [tracks, pls] = await Promise.all([db.allTracks(), db.allPlaylists()]);
@@ -487,5 +649,6 @@ splash && splash.addEventListener('click', hideSplash);
   if (!state.tracks.size) switchTab('library');
   renderAll();
   setTimeout(hideSplash, Math.max(0, 2300 - (Date.now() - splashStart)));
+  setTimeout(migrateLibrary, 2600);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });
 })();

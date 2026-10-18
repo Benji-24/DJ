@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>DJ</title>
-<meta name="theme-color" content="#0a0a0f">
+<meta name="theme-color" content="#060609">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -12,6 +12,9 @@
 <link rel="manifest" href="manifest.webmanifest">
 <link rel="apple-touch-icon" href="icons/icon-180.png">
 <link rel="icon" href="icons/icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
@@ -22,21 +25,61 @@
   <div class="sp-title">DJ</div>
   <div class="sp-by">by_ben</div>
 </div>
+
+<div class="bg-aura" aria-hidden="true"></div>
+
 <div id="app">
   <header class="top">
-    <h1>DJ<span class="dot">●</span><span class="by">by_ben</span></h1>
-    <button id="btnPlayPause" class="round" aria-label="Lecture / pause" disabled>
-      <svg viewBox="0 0 24 24" class="i-play"><path d="M7 4l13 8-13 8z"/></svg>
-      <svg viewBox="0 0 24 24" class="i-pause"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
-    </button>
+    <div class="brand">
+      <span class="logo">DJ</span>
+      <span class="by">by_ben</span>
+    </div>
+    <div class="top-right">
+      <div class="seg" id="modeSeg" role="tablist" aria-label="Durée de chaque morceau">
+        <button data-mode="full">Entier</button>
+        <button data-mode="club" class="on">Club</button>
+        <button data-mode="express">Express</button>
+      </div>
+      <button id="btnPlayPause" class="round" aria-label="Lecture / pause" disabled>
+        <svg viewBox="0 0 24 24" class="i-play"><path d="M7 4.5v15l12.5-7.5z"/></svg>
+        <svg viewBox="0 0 24 24" class="i-pause"><path d="M6.5 4.5h4v15h-4zM13.5 4.5h4v15h-4z"/></svg>
+      </button>
+    </div>
   </header>
 
-  <section class="deck" id="deck">
-    <div class="now-label">En cours</div>
-    <div class="now-title" id="nowTitle">Aucune musique</div>
-    <div class="now-meta" id="nowMeta">Importe tes musiques (MP3, MKV…) dans la Bibliothèque pour commencer</div>
-    <canvas id="wave" height="64"></canvas>
-    <div class="next-line" id="nextLine"></div>
+  <section class="decks">
+    <article class="deck a" id="deckA">
+      <div class="vinyl"><div class="vinyl-label"></div></div>
+      <div class="deck-info">
+        <div class="deck-tag">A · EN COURS</div>
+        <div class="deck-title">Aucune musique</div>
+        <div class="deck-artist">—</div>
+        <div class="deck-badges"></div>
+      </div>
+    </article>
+    <article class="deck b" id="deckB">
+      <div class="vinyl"><div class="vinyl-label"></div></div>
+      <div class="deck-info">
+        <div class="deck-tag">B · SUIVANT</div>
+        <div class="deck-title">—</div>
+        <div class="deck-artist">Ajoute une musique</div>
+        <div class="deck-badges"></div>
+      </div>
+    </article>
+  </section>
+
+  <section class="scope">
+    <canvas id="scope"></canvas>
+    <div class="scope-time" id="scopeTime"></div>
+  </section>
+
+  <section class="ai" id="ai">
+    <div class="ai-orb"><i></i></div>
+    <div class="ai-body">
+      <div class="ai-head">IA DJ <span id="aiState">en attente</span></div>
+      <div class="ai-text" id="aiText">Importe tes musiques puis lance un set.</div>
+      <div class="ai-chips" id="aiChips"></div>
+    </div>
   </section>
 
   <section class="remix">
@@ -52,15 +95,15 @@
       <button data-style="brake" class="chip">Frein</button>
     </div>
     <div class="pads">
-      <button class="pad" data-fx="echo">Écho</button>
-      <button class="pad" data-fx="filter">Filtre</button>
-      <button class="pad" data-fx="loop">Boucle</button>
-      <button class="pad" data-fx="bass">Sans basse</button>
+      <button class="pad" data-fx="echo"><b>Écho</b><small>1 temps</small></button>
+      <button class="pad" data-fx="filter"><b>Filtre</b><small>étouffé</small></button>
+      <button class="pad" data-fx="loop"><b>Boucle</b><small>1 mesure</small></button>
+      <button class="pad" data-fx="bass"><b>Basses</b><small>coupées</small></button>
     </div>
   </section>
 
   <nav class="tabs">
-    <button data-tab="queue" class="on">File d'attente</button>
+    <button data-tab="queue" class="on">File</button>
     <button data-tab="library">Bibliothèque</button>
     <button data-tab="playlists">Playlists</button>
   </nav>
@@ -70,10 +113,11 @@
   <section class="panel hidden" id="tab-library">
     <label class="import">
       <input type="file" id="fileInput" multiple>
-      <span>+ Importer des musiques</span>
+      <span><b>+</b> Importer des musiques</span>
+      <small>MP3, M4A, WAV, MKV, MP4…</small>
     </label>
     <div class="import-status" id="importStatus"></div>
-    <input type="search" id="search" class="search" placeholder="Rechercher…">
+    <input type="search" id="search" class="search" placeholder="Rechercher un titre, un artiste…">
     <div id="libList"></div>
   </section>
 
@@ -81,6 +125,8 @@
     <button class="wide" id="btnNewPlaylist">+ Nouvelle playlist</button>
     <div id="plList"></div>
   </section>
+
+  <footer class="foot">DJ · by_ben</footer>
 </div>
 
 <div class="sheet-bg hidden" id="sheetBg"><div class="sheet" id="sheet"></div></div>
