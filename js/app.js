@@ -1,6 +1,7 @@
 import { db } from './db.js';
 import { analyzeBuffer } from './analyze.js';
 import { Engine } from './engine.js';
+import { isVideo, extractAudio } from './convert.js';
 
 const engine = new Engine();
 window.__engine = engine; // utile pour les tests
@@ -194,21 +195,32 @@ async function importFiles(files) {
   for (let i = 0; i < files.length; i++) {
     const f = files[i];
     const { artist, title } = parseName(f.name);
-    st.textContent = `Analyse ${i + 1}/${files.length} : ${title}…`;
+    const head = `${i + 1}/${files.length} : ${title}`;
+    st.textContent = `Analyse ${head}…`;
     try {
-      const ab = await f.arrayBuffer();
+      let blob = f;
+      if (isVideo(f)) {
+        // vidéo (MKV…) : on ne garde que le son
+        blob = await extractAudio(f, ({ progress, status }) => {
+          if (status === 'loading') st.textContent = 'Chargement du lecteur vidéo (32 Mo, une seule fois)…';
+          else if (progress != null && progress >= 0 && progress <= 1) st.textContent = `Extraction du son ${head}… ${Math.round(progress * 100)} %`;
+          else st.textContent = `Extraction du son ${head}…`;
+        });
+        st.textContent = `Analyse ${head}…`;
+      }
+      const ab = await blob.arrayBuffer();
       const buf = await engine.ctx.decodeAudioData(ab);
       await new Promise(r => setTimeout(r, 0));
       const a = analyzeBuffer(buf);
       const t = { id: uid(), title, artist, added: Date.now(), ...a };
-      await db.putBlob(t.id, f);
+      await db.putBlob(t.id, blob);
       await db.putTrack(t);
       state.tracks.set(t.id, t);
       ok++;
       renderLibrary();
     } catch (e) {
       console.error(e);
-      toast('Fichier non lisible : ' + f.name);
+      toast(e && e.message === 'noaudio' ? 'Pas de son dans : ' + f.name : 'Fichier non lisible : ' + f.name);
     }
   }
   st.textContent = ok ? `${ok} musique${ok > 1 ? 's' : ''} ajoutée${ok > 1 ? 's' : ''} ✔︎` : '';
