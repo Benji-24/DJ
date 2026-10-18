@@ -1,21 +1,24 @@
-// Moteur DJ : deux platines virtuelles, mix calé sur la grille (temps, mesures, phrases),
-// tempo ajusté SANS changer la hauteur, échange des basses, remix, effets en direct.
-import { planTransition, remixInPos, beatLen, barLen } from './brain.js';
+// Moteur DJ : deux platines virtuelles + table de mixage (EQ 3 bandes, filtres),
+// mix calé sur la grille (temps, mesures, phrases), tempo ajusté SANS changer la hauteur,
+// remix propres (sans clic ni saturation) et effets en direct.
+import { planTransition, remixInPos, beatLen, tempoRatio } from './brain.js';
 
-const XF = 0.04; // fondu de raccord (s)
+const XF = 0.04;   // fondu de raccord étirement → original (s)
+const MICRO = 0.012; // micro-fondu anti-clic (s)
+const KILL = -30;  // coupure d'une bande d'EQ (dB)
 
-function curve(from, to, shape = 'sin', n = 128) {
+const eqCurve = (shape, n = 128) => {
   const c = new Float32Array(n);
-  for (let i = 0; i < n; i++) {
-    const x = i / (n - 1);
-    const y = shape === 'sin' ? Math.sin(x * Math.PI / 2) : shape === 'cos' ? Math.cos(x * Math.PI / 2) : x;
-    c[i] = shape === 'cos' ? to + (from - to) * y : from + (to - from) * y;
-  }
+  for (let i = 0; i < n; i++) { const x = i / (n - 1); c[i] = shape === 'in' ? Math.sin(x * Math.PI / 2) : Math.cos(x * Math.PI / 2); }
   return c;
-}
-function setCurve(param, from, to, t0, dur, shape) {
-  try { param.setValueAtTime(from, t0 - 0.003); param.setValueCurveAtTime(curve(from, to, shape), t0, dur); }
-  catch (e) { param.setValueAtTime(from, t0); param.linearRampToValueAtTime(to, t0 + dur); }
+};
+const CURVE_IN = eqCurve('in'), CURVE_OUT = eqCurve('out');
+// fondu à puissance constante (pas de creux ni de bosse de volume)
+function powerFade(param, dir, t0, dur, scale = 1) {
+  const c = dir === 'in' ? CURVE_IN : CURVE_OUT;
+  const curve = scale === 1 ? c : c.map(v => v * scale);
+  try { param.setValueAtTime(curve[0], t0 - 0.002); param.setValueCurveAtTime(curve, t0, dur); }
+  catch (e) { param.setValueAtTime(curve[0], t0); param.linearRampToValueAtTime(curve[curve.length - 1], t0 + dur); }
 }
 function ramp(param, value, t0, dur, exp = false) {
   param.cancelScheduledValues(t0);
@@ -23,19 +26,32 @@ function ramp(param, value, t0, dur, exp = false) {
   if (exp) param.exponentialRampToValueAtTime(Math.max(value, 0.0001), t0 + dur);
   else param.linearRampToValueAtTime(value, t0 + dur);
 }
+// écrêteur de sécurité : totalement transparent sous -2,5 dB, arrondi au-dessus
+function softClipCurve() {
+  const n = 4096, c = new Float32Array(n), T = 0.75;
+  for (let i = 0; i < n; i++) {
+    const x = i / (n - 1) * 2 - 1, a = Math.abs(x);
+    c[i] = a <= T ? x : Math.sign(x) * (T + (1 - T) * Math.tanh((a - T) / (1 - T)));
+  }
+  return c;
+}
 
 class Voice {
   constructor(engine, track, buffer) {
     const c = engine.ctx;
     this.e = engine; this.ctx = c; this.track = track; this.buffer = buffer;
     this.input = c.createGain();
-    this.low = c.createBiquadFilter(); this.low.type = 'lowshelf'; this.low.frequency.value = 200; this.low.gain.value = 0;
+    // EQ 3 bandes comme sur une table de mixage DJ
+    this.low = c.createBiquadFilter(); this.low.type = 'lowshelf'; this.low.frequency.value = 250;
+    this.mid = c.createBiquadFilter(); this.mid.type = 'peaking'; this.mid.frequency.value = 1000; this.mid.Q.value = 0.7;
+    this.high = c.createBiquadFilter(); this.high.type = 'highshelf'; this.high.frequency.value = 4000;
     this.hp = c.createBiquadFilter(); this.hp.type = 'highpass'; this.hp.frequency.value = 10; this.hp.Q.value = 0.7;
     this.lp = c.createBiquadFilter(); this.lp.type = 'lowpass'; this.lp.frequency.value = 22000; this.lp.Q.value = 0.7;
     this.out = c.createGain();
     this.norm = c.createGain(); this.norm.gain.value = track.gain || 1;
     this.send = c.createGain(); this.send.gain.value = 0;
-    this.input.connect(this.low); this.low.connect(this.hp); this.hp.connect(this.lp); this.lp.connect(this.out);
+    this.input.connect(this.low); this.low.connect(this.mid); this.mid.connect(this.high);
+    this.high.connect(this.hp); this.hp.connect(this.lp); this.lp.connect(this.out);
     this.out.connect(this.norm); this.norm.connect(engine.bus);
     this.lp.connect(this.send); this.send.connect(engine.delayIn);
     this.period = 60 / track.bpm;
@@ -49,10 +65,21 @@ class Voice {
     this.srcs.push(s);
     return s;
   }
-  startLinear(when, pos, rate = 1) {
+  fadeIn(when) {
+    this.input.gain.setValueAtTime(0, Math.max(this.ctx.currentTime, when - 0.001));
+    this.input.gain.linearRampToValueAtTime(1, when + MICRO);
+  }
+  // coupe proprement à l'instant t (micro-fondu)
+  cutAt(t) {
+    this.input.gain.setValueAtTime(1, t - MICRO);
+    this.input.gain.linearRampToValueAtTime(0, t);
+    this.stop(t + 0.02);
+  }
+  startLinear(when, pos, rate = 1, fade = true) {
     pos = Math.max(0, Math.min(pos, this.buffer.duration - 0.5));
     this.startPos = pos;
     this.lin = { t: when, p: pos, rate };
+    if (fade) this.fadeIn(when);
     this.src = this.mk(this.buffer, rate);
     this.src.start(when, pos);
     this.endT = when + (this.buffer.duration - pos) / rate;
@@ -75,7 +102,7 @@ class Voice {
     this.lin = { t: seam, p: p2, rate: 1 };
     this.endT = seam + (this.buffer.duration - p2);
   }
-  pin(u) { // position relative dans la partie étirée
+  pin(u) {
     const { r0, hold, glide } = this.str;
     if (u <= hold) return r0 * u;
     const v = Math.min(u - hold, glide);
@@ -115,6 +142,18 @@ class Voice {
     if (this.src) this.src.playbackRate.setValueAtTime(r, when);
     this.endT = when + (this.buffer.duration - p) / r;
   }
+  // morceau de son en boucle, avec micro-fondus (aucun clic à la jonction)
+  loopBuffer(p0, len) {
+    const b = this.buffer, sr = b.sampleRate, n = Math.max(64, Math.round(len * sr)), a = Math.floor(p0 * sr);
+    const out = this.ctx.createBuffer(b.numberOfChannels, n, sr);
+    const f = Math.min(Math.floor(n / 4), Math.round(0.003 * sr));
+    for (let ch = 0; ch < b.numberOfChannels; ch++) {
+      const src = b.getChannelData(ch), dst = out.getChannelData(ch);
+      for (let i = 0; i < n; i++) dst[i] = src[a + i] || 0;
+      for (let i = 0; i < f; i++) { const g = i / f; dst[i] *= g; dst[n - 1 - i] *= g; }
+    }
+    return out;
+  }
   stopSrc(s, when) { try { s && s.stop(when); } catch (e) { } }
   stop(when) { this.srcs.forEach(s => this.stopSrc(s, when)); }
   dispose() {
@@ -138,17 +177,23 @@ export class Engine {
     try { if (navigator.audioSession) navigator.audioSession.type = 'playback'; } catch (e) { }
     const AC = window.AudioContext || window.webkitAudioContext;
     const c = this.ctx = new AC({ latencyHint: 'playback' });
-    this.bus = c.createGain(); this.bus.gain.value = 0.9;
-    const lim = c.createDynamicsCompressor();
-    lim.threshold.value = -3; lim.knee.value = 3; lim.ratio.value = 14; lim.attack.value = 0.002; lim.release.value = 0.15;
-    this.bus.connect(lim); lim.connect(c.destination);
-    this.analyser = c.createAnalyser(); this.analyser.fftSize = 256; lim.connect(this.analyser);
+    // Chaîne master : marge de volume → compresseur doux → écrêteur doux (jamais de saturation dure)
+    this.bus = c.createGain(); this.bus.gain.value = 0.78;
+    const glue = c.createDynamicsCompressor();
+    glue.threshold.value = -14; glue.knee.value = 12; glue.ratio.value = 2.5; glue.attack.value = 0.012; glue.release.value = 0.3;
+    const clip = c.createWaveShaper(); clip.curve = softClipCurve(); clip.oversample = '2x';
+    this.master = c.createGain(); this.master.gain.value = 0.92;
+    this.bus.connect(glue); glue.connect(clip); clip.connect(this.master); this.master.connect(c.destination);
+    this.analyser = c.createAnalyser(); this.analyser.fftSize = 256; this.master.connect(this.analyser);
+    // Écho (chaud : filtré dans la boucle)
     this.delayIn = c.createGain();
     this.delay = c.createDelay(4);
-    this.fb = c.createGain(); this.fb.gain.value = 0.5;
-    this.echoHP = c.createBiquadFilter(); this.echoHP.type = 'highpass'; this.echoHP.frequency.value = 280;
-    this.delayIn.connect(this.delay); this.delay.connect(this.echoHP); this.echoHP.connect(this.fb); this.fb.connect(this.delay);
-    this.delay.connect(this.bus);
+    this.fb = c.createGain(); this.fb.gain.value = 0.4;
+    const ehp = c.createBiquadFilter(); ehp.type = 'highpass'; ehp.frequency.value = 250;
+    const elp = c.createBiquadFilter(); elp.type = 'lowpass'; elp.frequency.value = 4500;
+    this.echoOut = c.createGain(); this.echoOut.gain.value = 0.75;
+    this.delayIn.connect(this.delay); this.delay.connect(ehp); ehp.connect(elp); elp.connect(this.fb); this.fb.connect(this.delay);
+    elp.connect(this.echoOut); this.echoOut.connect(this.bus);
     const nb = c.createBuffer(1, c.sampleRate * 2, c.sampleRate);
     const d = nb.getChannelData(0); for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     this.noise = nb;
@@ -180,7 +225,7 @@ export class Engine {
     const v = new Voice(this, track, buffer);
     v.deck = 'A';
     v.out.gain.setValueAtTime(0, this.now);
-    v.out.gain.linearRampToValueAtTime(1, this.now + 0.15);
+    v.out.gain.linearRampToValueAtTime(1, this.now + 0.2);
     v.startLinear(this.now + 0.05, pos ?? track.start, 1);
     this.cur = v;
     this.emit('change', track);
@@ -198,11 +243,10 @@ export class Engine {
     const p = planTransition(cur.track, nx.track, { pos: cur.posAt(now), playedFrom: cur.startPos, mode: this.mode });
     p.T0 = cur.timeOfPos(p.outPos);
     p.ready = true;
-    const needStretch = (p.type === 'blend' || p.type === 'quick') && Math.abs(p.r - 1) > 0.003;
-    if (needStretch) {
+    const overlap = p.type === 'blend' || p.type === 'cut';
+    if (overlap && Math.abs(p.r - 1) > 0.003) {
       p.ready = false;
-      const B = beatLen(cur.track);
-      const hold = p.mixBeats * B;
+      const hold = p.mixBeats * beatLen(cur.track);
       const glide = 16 * beatLen(nx.track);
       const sr = nx.buffer.sampleRate;
       const need = (p.r * hold + (p.r + 1) / 2 * glide + 1.2) * sr;
@@ -225,7 +269,7 @@ export class Engine {
   }
 
   transition(p) {
-    const out = this.cur, nx = this.next, c = this.ctx;
+    const out = this.cur, nx = this.next, c = this.ctx, now = c.currentTime;
     if (this.fx.loop) this.loop(false);
     if (this.fx.filter) this.filter(false);
     if (this.fx.bass) this.bass(false);
@@ -235,35 +279,46 @@ export class Engine {
     const B = out.beatSec(T0);
     let swapAt, endAt;
 
-    if (p.type === 'blend' || p.type === 'quick') {
+    if (p.type === 'blend' || p.type === 'cut') {
+      // Mix calé façon DJ : le suivant entre sans basses et médiums réduits,
+      // échange des basses au milieu, puis le précédent s'efface.
       const L = p.mixBeats * B, half = L / 2;
       if (p.st) v.startStretched(T0, p.inPos, p.st);
       else {
-        v.startLinear(T0, p.inPos, p.r);
-        if (Math.abs(p.r - 1) > 0.003) { // secours si l'étirement n'est pas prêt
+        v.startLinear(T0, p.inPos, p.r, false);
+        if (Math.abs(p.r - 1) > 0.003) {
           for (let i = 1; i <= 16; i++) this.at(T0 + L + i * 0.5, () => { if (this.cur === v && !v.str) v.setRate(p.r + (1 - p.r) * i / 16, this.now + 0.03); });
         }
       }
-      v.out.gain.setValueAtTime(0, c.currentTime);
-      setCurve(v.out.gain, 0, 1, T0, half, 'sin');
-      v.low.gain.setValueAtTime(-40, c.currentTime);
-      v.low.gain.setValueAtTime(-40, T0 + half - B);
+      const midCut = p.type === 'cut' ? -9 : -6;
+      v.out.gain.setValueAtTime(0, now);
+      powerFade(v.out.gain, 'in', T0, half, 0.92);
+      v.out.gain.setValueAtTime(0.92, T0 + half);
+      v.out.gain.linearRampToValueAtTime(1, T0 + half + B);
+      v.low.gain.setValueAtTime(KILL, now);
+      v.low.gain.setValueAtTime(KILL, T0 + half - B / 2);
       v.low.gain.linearRampToValueAtTime(0, T0 + half);
-      v.hp.frequency.setValueAtTime(220, c.currentTime);
-      v.hp.frequency.setValueAtTime(220, T0);
-      v.hp.frequency.exponentialRampToValueAtTime(10, T0 + half);
-      out.low.gain.setValueAtTime(out.low.gain.value, T0 + half - B);
-      out.low.gain.linearRampToValueAtTime(-40, T0 + half);
-      out.hp.frequency.setValueAtTime(10, T0 + half);
-      out.hp.frequency.exponentialRampToValueAtTime(260, T0 + L);
-      setCurve(out.out.gain, 1, 0, T0 + half, half, 'cos');
+      v.mid.gain.setValueAtTime(midCut, now);
+      v.mid.gain.setValueAtTime(midCut, T0);
+      v.mid.gain.linearRampToValueAtTime(0, T0 + half);
+      out.low.gain.setValueAtTime(out.low.gain.value, T0 + half - B / 2);
+      out.low.gain.linearRampToValueAtTime(KILL, T0 + half);
+      out.mid.gain.setValueAtTime(out.mid.gain.value, T0 + half);
+      out.mid.gain.linearRampToValueAtTime(-6, T0 + L);
+      out.high.gain.setValueAtTime(out.high.gain.value, T0 + half);
+      out.high.gain.linearRampToValueAtTime(-8, T0 + L);
+      if (p.type === 'cut') {
+        out.lp.frequency.setValueAtTime(22000, T0);
+        out.lp.frequency.exponentialRampToValueAtTime(2500, T0 + half);
+      }
+      out.out.gain.setValueAtTime(1, T0 + half - 0.01);
+      powerFade(out.out.gain, 'out', T0 + half, half);
       out.stop(T0 + L + 0.05);
       swapAt = T0 + half; endAt = T0 + L;
     } else if (p.type === 'echo') {
-      this.delay.delayTime.setValueAtTime(B * 0.75, T0 - 0.05);
-      this.fb.gain.setValueAtTime(0.55, T0 - 0.05);
-      out.send.gain.setValueAtTime(0, c.currentTime);
-      out.send.gain.setValueAtTime(1, T0);
+      this.echoSetup(B, now);
+      out.send.gain.setValueAtTime(0, now);
+      out.send.gain.setValueAtTime(0.8, T0);
       out.send.gain.setValueAtTime(0, T0 + B);
       out.out.gain.setValueAtTime(1, T0 + B * 0.5);
       out.out.gain.linearRampToValueAtTime(0, T0 + B);
@@ -271,23 +326,39 @@ export class Engine {
       const tIn = T0 + 2 * B;
       v.startLinear(tIn, p.inPos, 1);
       v.out.gain.value = 1;
+      this.echoRelease(tIn + 4 * B);
       swapAt = tIn; endAt = tIn + 6;
-    } else { // fondu doux
-      const D = 8;
-      v.startLinear(T0, p.inPos, 1);
-      v.out.gain.setValueAtTime(0, c.currentTime);
-      setCurve(v.out.gain, 0, 1, T0, D * 0.6, 'sin');
-      setCurve(out.out.gain, 1, 0, T0 + D * 0.3, D * 0.7, 'cos');
+    } else { // fondu filtré (rythmes non calables)
+      const D = 6;
+      v.startLinear(T0, p.inPos, 1, false);
+      v.out.gain.setValueAtTime(0, now);
+      powerFade(v.out.gain, 'in', T0, D * 0.7);
+      v.hp.frequency.setValueAtTime(700, now);
+      v.hp.frequency.setValueAtTime(700, T0);
+      v.hp.frequency.exponentialRampToValueAtTime(10, T0 + D * 0.8);
+      out.out.gain.setValueAtTime(1, T0 + D * 0.3 - 0.01);
+      powerFade(out.out.gain, 'out', T0 + D * 0.3, D * 0.7);
       out.lp.frequency.setValueAtTime(22000, T0);
-      out.lp.frequency.exponentialRampToValueAtTime(500, T0 + D);
+      out.lp.frequency.exponentialRampToValueAtTime(300, T0 + D);
       out.stop(T0 + D + 0.05);
       swapAt = T0 + D / 2; endAt = T0 + D;
     }
-    this.commit(v, out, swapAt, endAt + 0.5, p.type);
+    this.commit(v, out, swapAt, endAt + 0.5, p.type, p.type === 'echo' ? T0 : T0, endAt);
   }
 
-  commit(v, old, swapAt, cleanupAt, kind) {
+  echoSetup(B, t) {
+    this.delay.delayTime.setValueAtTime(B * 0.75, t);
+    this.fb.gain.cancelScheduledValues(t);
+    this.fb.gain.setValueAtTime(0.45, t);
+  }
+  echoRelease(t) {
+    this.fb.gain.setValueAtTime(0.45, t);
+    this.fb.gain.linearRampToValueAtTime(0.2, t + 3);
+  }
+
+  commit(v, old, swapAt, cleanupAt, kind, t0, t1) {
     this.committed = true; this.next = null; this.inc = v; this.lastKind = kind;
+    this.mix = { t0: t0 ?? this.now, t1: Math.max(t1 ?? swapAt, swapAt), from: old.deck, to: v.deck };
     this.emit('transition', { kind, track: v.track, at: swapAt });
     this.at(swapAt, () => {
       this.cur = v; this.inc = null; this.committed = false; this.plan = null;
@@ -297,7 +368,7 @@ export class Engine {
     this.at(cleanupAt, () => old.dispose());
   }
 
-  // ---------- Remix : passer tout de suite à la suivante ----------
+  // ---------- Remix : passer tout de suite à la suivante, comme un DJ ----------
   remix(type) {
     if (!this.cur) return 'nocur';
     if (this.committed) return 'busy';
@@ -306,63 +377,65 @@ export class Engine {
     const c = this.ctx, out = this.cur, nx = this.next, now = c.currentTime;
     if (this.fx.loop) this.loop(false);
     if (type === 'auto') {
-      const types = ['echo', 'filter', 'loop', 'brake'].filter(t => t !== this.lastRemix);
-      type = types[Math.floor(Math.random() * types.length)];
+      const close = Math.abs(tempoRatio(out.track.bpm, nx.track.bpm) - 1) <= 0.08;
+      const pool = (close ? ['filter', 'loop', 'echo'] : ['echo', 'brake', 'filter']).filter(t => t !== this.lastRemix);
+      type = pool[Math.floor(Math.random() * pool.length)];
     }
     this.lastRemix = type;
     const B = out.beatSec(now);
     const t1 = out.nextBeatTime(now + 0.06);
-    const rate = out.rateAt(t1);
     let tIn;
 
     if (type === 'echo') {
-      this.delay.delayTime.setValueAtTime(B * 0.75, now);
-      this.fb.gain.setValueAtTime(0.6, now);
+      // écho sur 1 temps puis le suivant tombe sur la mesure
+      this.echoSetup(B, now);
       out.send.gain.setValueAtTime(0, now);
-      out.send.gain.setValueAtTime(1, t1);
+      out.send.gain.setValueAtTime(0.8, t1);
       out.send.gain.setValueAtTime(0, t1 + B);
-      out.out.gain.setValueAtTime(out.out.gain.value, t1 + B * 0.25);
-      out.out.gain.linearRampToValueAtTime(0, t1 + B * 0.5);
+      out.out.gain.setValueAtTime(out.out.gain.value, t1 + B * 0.5);
+      out.out.gain.linearRampToValueAtTime(0, t1 + B);
       out.stop(t1 + B + 0.05);
       tIn = t1 + 2 * B;
-      this.fb.gain.setValueAtTime(0.6, tIn + 4 * B);
-      this.fb.gain.linearRampToValueAtTime(0.35, tIn + 8 * B);
+      this.echoRelease(tIn + 4 * B);
     } else if (type === 'filter') {
-      const tEnd = t1 + 4 * B;
+      // montée : filtre qui ouvre les aigus sur 1 mesure, le suivant tombe sur le « 1 »
+      const tEnd = out.nextBarTime(t1 + 4 * B - 0.05);
       out.hp.frequency.setValueAtTime(20, t1);
-      out.hp.frequency.exponentialRampToValueAtTime(2500, tEnd);
-      out.hp.Q.setValueAtTime(5, t1);
+      out.hp.frequency.exponentialRampToValueAtTime(900, tEnd);
+      out.hp.Q.setValueAtTime(0.9, t1);
+      out.low.gain.setValueAtTime(out.low.gain.value, t1);
+      out.low.gain.linearRampToValueAtTime(KILL, tEnd - B);
       this.riser(t1, tEnd);
-      out.out.gain.setValueAtTime(out.out.gain.value, tEnd - 0.03);
-      out.out.gain.linearRampToValueAtTime(0, tEnd);
-      out.stop(tEnd + 0.05);
+      out.cutAt(tEnd);
       tIn = tEnd;
     } else if (type === 'loop') {
-      const p0 = out.posAt(t1), per = out.period;
-      out.srcs.forEach(s => out.stopSrc(s, t1));
+      // boucle qui se resserre (1 temps → ½ → ¼), sans clic
+      const p0 = out.posAt(t1), per = out.period, rate = out.rateAt(t1);
+      out.input.gain.setValueAtTime(1, t1);
+      out.srcs.forEach(s => out.stopSrc(s, t1 + 0.004));
       let t = t1;
-      for (const [len, rep] of [[1, 2], [0.5, 2], [0.25, 4], [0.125, 8]]) {
-        const s = out.mk(out.buffer, rate);
-        s.loop = true; s.loopStart = p0; s.loopEnd = p0 + len * per;
-        s.start(t, p0);
+      for (const [len, rep] of [[1, 2], [0.5, 2], [0.25, 4]]) {
+        const s = out.mk(out.loopBuffer(p0, len * per), rate);
+        s.loop = true;
+        s.start(t);
         const dur = len * rep * B;
         s.stop(t + dur);
         t += dur;
       }
       out.hp.frequency.setValueAtTime(20, t1);
-      out.hp.frequency.exponentialRampToValueAtTime(1200, t);
-      out.out.gain.setValueAtTime(out.out.gain.value, t - 0.02);
+      out.hp.frequency.exponentialRampToValueAtTime(600, t);
+      out.out.gain.setValueAtTime(out.out.gain.value, t - MICRO);
       out.out.gain.linearRampToValueAtTime(0, t);
       tIn = t;
     } else { // frein de vinyle
       out.srcs.forEach(s => {
         const pr = s.playbackRate;
-        pr.cancelScheduledValues(t1); pr.setValueAtTime(pr.value, t1); pr.linearRampToValueAtTime(0.02, t1 + 1.4);
+        pr.cancelScheduledValues(t1); pr.setValueAtTime(pr.value, t1); pr.linearRampToValueAtTime(0.001, t1 + 1.2);
       });
-      out.out.gain.setValueAtTime(out.out.gain.value, t1 + 1.0);
-      out.out.gain.linearRampToValueAtTime(0, t1 + 1.4);
-      out.stop(t1 + 1.5);
-      tIn = t1 + 1.45;
+      out.out.gain.setValueAtTime(out.out.gain.value, t1 + 0.7);
+      out.out.gain.linearRampToValueAtTime(0, t1 + 1.2);
+      out.stop(t1 + 1.25);
+      tIn = t1 + 1.15;
     }
 
     const v = new Voice(this, nx.track, nx.buffer);
@@ -370,18 +443,19 @@ export class Engine {
     v.out.gain.value = 1;
     v.startLinear(tIn, remixInPos(nx.track), 1);
     this.plan = null;
-    this.commit(v, out, tIn, tIn + 12, type);
+    this.commit(v, out, tIn, tIn + 12, type, now, tIn + 0.3);
     return type;
   }
 
   riser(t0, t1) {
     const c = this.ctx;
     const s = c.createBufferSource(); s.buffer = this.noise; s.loop = true;
-    const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 2;
+    const bp = c.createBiquadFilter(); bp.type = 'bandpass'; bp.Q.value = 1.2;
+    const lp = c.createBiquadFilter(); lp.type = 'lowpass'; lp.frequency.value = 6000;
     const g = c.createGain();
-    bp.frequency.setValueAtTime(400, t0); bp.frequency.exponentialRampToValueAtTime(7000, t1);
-    g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(0.14, t1 - 0.02); g.gain.linearRampToValueAtTime(0, t1);
-    s.connect(bp); bp.connect(g); g.connect(this.bus);
+    bp.frequency.setValueAtTime(300, t0); bp.frequency.exponentialRampToValueAtTime(4500, t1);
+    g.gain.setValueAtTime(0, t0); g.gain.linearRampToValueAtTime(0.045, t1 - 0.05); g.gain.linearRampToValueAtTime(0, t1);
+    s.connect(bp); bp.connect(lp); lp.connect(g); g.connect(this.bus);
     s.start(t0); s.stop(t1 + 0.05);
   }
 
@@ -389,23 +463,22 @@ export class Engine {
   echoThrow() {
     const v = this.cur; if (!v) return;
     const now = this.now, B = v.beatSec(now), t1 = v.nextBeatTime(now + 0.03);
-    this.delay.delayTime.setValueAtTime(B * 0.75, now);
-    this.fb.gain.setValueAtTime(0.55, now);
+    this.echoSetup(B, now);
     v.send.gain.setValueAtTime(0, now);
-    v.send.gain.setValueAtTime(1, t1);
+    v.send.gain.setValueAtTime(0.7, t1);
     v.send.gain.setValueAtTime(0, t1 + B);
   }
   filter(on) {
     const v = this.cur; if (!v) return;
     this.fx.filter = on;
     const B = v.beatSec();
-    ramp(v.lp.frequency, on ? 350 : 22000, this.now, on ? 2 * B : B, true);
-    ramp(v.lp.Q, on ? 4 : 0.7, this.now, B);
+    ramp(v.lp.frequency, on ? 600 : 22000, this.now, on ? 2 * B : B, true);
+    ramp(v.lp.Q, on ? 1.4 : 0.7, this.now, B);
   }
   bass(on) {
     const v = this.cur; if (!v) return;
     this.fx.bass = on;
-    ramp(v.low.gain, on ? -40 : 0, this.now, 0.06);
+    ramp(v.low.gain, on ? KILL : 0, this.now, 0.08);
   }
   loop(on) {
     const v = this.cur; if (!v) return false;
@@ -413,16 +486,19 @@ export class Engine {
     if (on) {
       if (this.fx.loop || v.stretching) return false;
       const t1 = v.nextBeatTime(now + 0.03), p0 = v.posAt(t1);
-      const s = v.mk(v.buffer, v.lin.rate);
-      s.loop = true; s.loopStart = p0; s.loopEnd = p0 + 4 * v.period;
-      v.stopSrc(v.src, t1);
-      s.start(t1, p0);
+      const s = v.mk(v.loopBuffer(p0, 4 * v.period), v.lin.rate);
+      s.loop = true;
+      v.stopSrc(v.src, t1 + 0.004);
+      s.start(t1);
       v.loopSrc = s; this.fx.loop = true;
     } else {
       if (!this.fx.loop) return false;
-      const t = now + 0.02;
-      v.stopSrc(v.loopSrc, t); v.loopSrc = null;
-      const s = v.mk(v.buffer, v.lin.rate); s.start(t, Math.max(0, v.posAt(t)));
+      const t = now + 0.03;
+      v.stopSrc(v.loopSrc, t + 0.004); v.loopSrc = null;
+      const s = v.mk(v.buffer, v.lin.rate);
+      const g = this.ctx.createGain(); s.disconnect(); s.connect(g); g.connect(v.input);
+      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 0.006);
+      s.start(t, Math.max(0, v.posAt(t)));
       v.src = s; this.fx.loop = false;
     }
     return true;
@@ -441,7 +517,7 @@ export class Engine {
     if (this.next && !this.plan) this.makePlan();
     const p = this.plan;
     if (p) {
-      if (p.T0 < now + 0.15) { this.plan = null; return; } // raté : on replanifie
+      if (p.T0 < now + 0.15) { this.plan = null; return; }
       if (p.T0 - now <= 0.8) {
         if (this.fx.loop) this.loop(false);
         this.transition(p);

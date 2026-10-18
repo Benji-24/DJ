@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>DJ</title>
-<meta name="theme-color" content="#060609">
+<meta name="theme-color" content="#0d1016">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -14,96 +14,94 @@
 <link rel="icon" href="icons/icon-192.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@500;700;900&family=Space+Grotesk:wght@400;500;600;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600;700&family=Barlow:wght@400;500;600;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
 <div id="splash" aria-hidden="true">
-  <div class="sp-glow"></div>
-  <div class="sp-disc"><div class="sp-groove"></div><div class="sp-label">DJ</div></div>
-  <div class="sp-eq"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
-  <div class="sp-title">DJ</div>
+  <div class="sp-jog"><div class="sp-ring"></div><div class="sp-plate"><span>DJ</span></div></div>
+  <div class="sp-name">DJ</div>
   <div class="sp-by">by_ben</div>
 </div>
 
-<div class="bg-aura" aria-hidden="true"></div>
-
 <div id="app">
   <header class="top">
-    <div class="brand">
-      <span class="logo">DJ</span>
-      <span class="by">by_ben</span>
-    </div>
+    <div class="brand"><span class="logo">DJ</span><span class="by">by_ben</span></div>
     <div class="top-right">
-      <div class="seg" id="modeSeg" role="tablist" aria-label="Durée de chaque morceau">
+      <div class="seg" id="modeSeg" aria-label="Durée de chaque morceau">
         <button data-mode="full">Entier</button>
         <button data-mode="club" class="on">Club</button>
         <button data-mode="express">Express</button>
       </div>
-      <button id="btnPlayPause" class="round" aria-label="Lecture / pause" disabled>
+      <button id="btnPlayPause" class="play" aria-label="Lecture / pause" disabled>
         <svg viewBox="0 0 24 24" class="i-play"><path d="M7 4.5v15l12.5-7.5z"/></svg>
         <svg viewBox="0 0 24 24" class="i-pause"><path d="M6.5 4.5h4v15h-4zM13.5 4.5h4v15h-4z"/></svg>
       </button>
     </div>
   </header>
 
-  <section class="decks">
-    <article class="deck a" id="deckA">
-      <div class="vinyl"><div class="vinyl-label"></div></div>
-      <div class="deck-info">
-        <div class="deck-tag">A · EN COURS</div>
-        <div class="deck-title">Aucune musique</div>
-        <div class="deck-artist">—</div>
-        <div class="deck-badges"></div>
+  <section class="deck" id="deckA" data-deck="A">
+    <div class="jog"><canvas class="jog-ring" width="120" height="120"></canvas><div class="jog-plate"></div><span class="jog-letter">A</span></div>
+    <div class="deck-main">
+      <div class="deck-row">
+        <div class="deck-names"><div class="deck-title">Aucune musique</div><div class="deck-artist">Importe tes musiques</div></div>
+        <div class="deck-bpm"><b>—</b><small>BPM</small></div>
       </div>
-    </article>
-    <article class="deck b" id="deckB">
-      <div class="vinyl"><div class="vinyl-label"></div></div>
-      <div class="deck-info">
-        <div class="deck-tag">B · SUIVANT</div>
-        <div class="deck-title">—</div>
-        <div class="deck-artist">Ajoute une musique</div>
-        <div class="deck-badges"></div>
-      </div>
-    </article>
-  </section>
-
-  <section class="scope">
-    <canvas id="scope"></canvas>
-    <div class="scope-time" id="scopeTime"></div>
-  </section>
-
-  <section class="ai" id="ai">
-    <div class="ai-orb"><i></i></div>
-    <div class="ai-body">
-      <div class="ai-head">IA DJ <span id="aiState">en attente</span></div>
-      <div class="ai-text" id="aiText">Importe tes musiques puis lance un set.</div>
-      <div class="ai-chips" id="aiChips"></div>
+      <div class="deck-meta"></div>
+      <canvas class="overview"></canvas>
     </div>
   </section>
 
-  <section class="remix">
-    <button id="btnRemix" class="remix-btn" disabled>
-      <span class="remix-main">REMIX</span>
-      <span class="remix-sub">passer à la suivante</span>
+  <section class="scope"><canvas id="scope"></canvas></section>
+
+  <section class="deck" id="deckB" data-deck="B">
+    <div class="jog"><canvas class="jog-ring" width="120" height="120"></canvas><div class="jog-plate"></div><span class="jog-letter">B</span></div>
+    <div class="deck-main">
+      <div class="deck-row">
+        <div class="deck-names"><div class="deck-title">—</div><div class="deck-artist">Ajoute une musique à la suite</div></div>
+        <div class="deck-bpm"><b>—</b><small>BPM</small></div>
+      </div>
+      <div class="deck-meta"></div>
+      <canvas class="overview"></canvas>
+    </div>
+  </section>
+
+  <section class="automix" id="automix">
+    <div class="am-head">
+      <span class="am-name">AutoMix</span>
+      <span class="am-state" id="amState">en attente</span>
+    </div>
+    <div class="am-text" id="amText">Importe tes musiques, puis lance un set.</div>
+    <div class="fader" id="fader" aria-hidden="true">
+      <span class="fader-a">A</span>
+      <div class="fader-track"><div class="fader-fill"></div><div class="fader-cap"></div></div>
+      <span class="fader-b">B</span>
+    </div>
+    <div class="am-tags" id="amTags"></div>
+  </section>
+
+  <section class="perform">
+    <button id="btnRemix" class="remix" disabled>
+      <span class="remix-led"></span>
+      <span class="remix-label"><b>Remix</b><small>passer à la suivante maintenant</small></span>
     </button>
-    <div class="chips" id="remixStyles">
-      <button data-style="auto" class="chip on">Auto</button>
-      <button data-style="echo" class="chip">Écho</button>
-      <button data-style="filter" class="chip">Montée</button>
-      <button data-style="loop" class="chip">Boucle</button>
-      <button data-style="brake" class="chip">Frein</button>
+    <div class="styles" id="remixStyles" aria-label="Style du remix">
+      <button data-style="auto" class="on">Auto</button>
+      <button data-style="echo">Écho</button>
+      <button data-style="filter">Montée</button>
+      <button data-style="loop">Boucle</button>
+      <button data-style="brake">Frein</button>
     </div>
     <div class="pads">
-      <button class="pad" data-fx="echo"><b>Écho</b><small>1 temps</small></button>
-      <button class="pad" data-fx="filter"><b>Filtre</b><small>étouffé</small></button>
-      <button class="pad" data-fx="loop"><b>Boucle</b><small>1 mesure</small></button>
-      <button class="pad" data-fx="bass"><b>Basses</b><small>coupées</small></button>
+      <button class="pad" data-fx="echo" style="--pad:#4da3ff"><b>Écho</b><small>un temps</small></button>
+      <button class="pad" data-fx="filter" style="--pad:#b07cff"><b>Filtre</b><small>étouffer</small></button>
+      <button class="pad" data-fx="loop" style="--pad:#3ddc84"><b>Boucle</b><small>une mesure</small></button>
+      <button class="pad" data-fx="bass" style="--pad:#ff9a3d"><b>Basses</b><small>couper</small></button>
     </div>
   </section>
 
   <nav class="tabs">
-    <button data-tab="queue" class="on">File</button>
+    <button data-tab="queue" class="on">File d'attente</button>
     <button data-tab="library">Bibliothèque</button>
     <button data-tab="playlists">Playlists</button>
   </nav>
@@ -113,20 +111,20 @@
   <section class="panel hidden" id="tab-library">
     <label class="import">
       <input type="file" id="fileInput" multiple>
-      <span><b>+</b> Importer des musiques</span>
+      <span>Importer des musiques</span>
       <small>MP3, M4A, WAV, MKV, MP4…</small>
     </label>
     <div class="import-status" id="importStatus"></div>
-    <input type="search" id="search" class="search" placeholder="Rechercher un titre, un artiste…">
+    <input type="search" id="search" class="search" placeholder="Rechercher un titre ou un artiste">
     <div id="libList"></div>
   </section>
 
   <section class="panel hidden" id="tab-playlists">
-    <button class="wide" id="btnNewPlaylist">+ Nouvelle playlist</button>
+    <button class="wide" id="btnNewPlaylist">Nouvelle playlist</button>
     <div id="plList"></div>
   </section>
 
-  <footer class="foot">DJ · by_ben</footer>
+  <footer class="foot">DJ by_ben</footer>
 </div>
 
 <div class="sheet-bg hidden" id="sheetBg"><div class="sheet" id="sheet"></div></div>

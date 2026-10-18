@@ -6,7 +6,7 @@
 // - volume (pour que tous les morceaux sonnent au même niveau)
 // - forme d'onde 3 bandes (basses / médiums / aigus) pour l'affichage
 
-export const ANALYSIS_VERSION = 2;
+export const ANALYSIS_VERSION = 3;
 const FPS = 100;
 
 const PITCH = ['C', 'C#', 'D', 'D#', 'E', 'F', 'F#', 'G', 'G#', 'A', 'A#', 'B'];
@@ -164,7 +164,7 @@ export function analyzeBuffer(buffer) {
   let sq = 0, nn = 0;
   for (let i = Math.floor(sorted.length * 0.5); i < sorted.length; i++) { sq += sorted[i] * sorted[i]; nn++; }
   const loud = Math.sqrt(sq / Math.max(1, nn)) || 1e-4;
-  const gain = Math.min(2.2, Math.max(0.3, 0.2 / loud));
+  const gain = Math.min(1.6, Math.max(0.4, 0.16 / loud));
 
   // ---------- 8) Tonalité ----------
   const { key, camelot, keyConf, chroma, bassChroma } = detectKey(L, R, sr, contentStart, contentEnd);

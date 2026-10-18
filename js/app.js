@@ -264,7 +264,7 @@ $('#fileInput').addEventListener('change', e => {
 
 // ---------- Rendu ----------
 const hueOf = str => { let h = 0; for (const c of String(str)) h = (h * 31 + c.charCodeAt(0)) % 360; return h; };
-const artOf = t => { const h = hueOf(t.artist || t.title); return `linear-gradient(135deg, hsl(${h} 85% 58%), hsl(${(h + 60) % 360} 80% 40%))`; };
+const artOf = t => { const h = hueOf(t.artist || t.title); return `linear-gradient(160deg, hsl(${h} 45% 34%), hsl(${(h + 40) % 360} 40% 18%))`; };
 const keyHue = cam => cam ? ((parseInt(cam) - 1) * 30 + (cam.endsWith('B') ? 12 : 0)) % 360 : 0;
 const keyBadge = t => t.camelot ? `<span class="badge key" style="--h:${keyHue(t.camelot)}">${t.camelot}</span>` : '';
 function trackRow(t, extra = '', cls = '') {
@@ -272,7 +272,7 @@ function trackRow(t, extra = '', cls = '') {
   return `<div class="row ${cls}" data-id="${t.id}">
     <div class="art" style="--art:${artOf(t)}"></div>
     <div class="info"><div class="t">${esc(t.title)}</div><div class="a">${esc(t.artist || 'Artiste inconnu')} · ${fmt(t.duration)}</div></div>
-    <div class="meta"><span class="bpm">${pending ? '…' : Math.round(t.bpm) + ' BPM'}</span>${pending ? '' : keyBadge(t)}</div>${extra}</div>`;
+    <div class="meta">${pending ? '…' : Math.round(t.bpm)}${pending || !t.camelot ? '' : `<span class="key" style="--h:${keyHue(t.camelot)}">${t.camelot}</span>`}</div>${extra}</div>`;
 }
 
 function renderQueue() {
@@ -291,8 +291,8 @@ function renderQueue() {
     const t = state.tracks.get(id); if (!t) return;
     const idx = state.qi + 1 + k;
     const locked = engine.committed && k === 0;
-    h += trackRow(t, locked ? `<span class="act cool">Entre</span>` :
-      `<button class="act hot" data-now="${idx}">⚡</button><button class="icon-btn" data-rm="${idx}">✕</button>`, locked ? 'incoming' : '');
+    h += trackRow(t, locked ? `<span class="act live">Entre</span>` :
+      `<button class="act go" data-now="${idx}">Maintenant</button><button class="icon-btn" data-rm="${idx}" aria-label="Retirer">✕</button>`, locked ? 'incoming' : '');
   });
   const played = q.slice(0, Math.max(0, state.qi)).slice(-5);
   if (played.length) {
@@ -322,10 +322,10 @@ function renderLibrary() {
   }
   const s = state.search.toLowerCase();
   const list = s ? all.filter(t => (t.title + ' ' + t.artist).toLowerCase().includes(s)) : all;
-  el.innerHTML = `<div class="pl-actions" style="margin:8px 0 4px">
-      <button class="act" data-all="0">▶ Tout lancer</button><button class="act" data-all="1">🔀 Mélanger</button>
-      <span style="flex:1"></span><span class="a" style="color:var(--dim);font-size:13px;align-self:center">${all.length} titres</span></div>` +
-    list.map(t => trackRow(t, `<button class="act" data-next="${t.id}">+ Ensuite</button><button class="icon-btn" data-more="${t.id}">⋯</button>`)).join('');
+  el.innerHTML = `<div class="lib-actions">
+      <button class="act go" data-all="0">Tout lancer</button><button class="act" data-all="1">Mélanger</button>
+      <span class="count">${all.length} titres</span></div>` +
+    list.map(t => trackRow(t, `<button class="act" data-next="${t.id}">Ensuite</button><button class="icon-btn" data-more="${t.id}" aria-label="Options">⋯</button>`)).join('');
 }
 $('#search').addEventListener('input', e => { state.search = e.target.value; renderLibrary(); });
 $('#libList').addEventListener('click', e => {
@@ -393,7 +393,7 @@ function renderPlaylists() {
   el.innerHTML = state.playlists.map(p => {
     const n = p.ids.filter(id => state.tracks.has(id)).length;
     return `<div class="row" data-pl="${p.id}"><div class="info"><div class="t">${esc(p.name)}</div><div class="a">${n} titre${n > 1 ? 's' : ''}</div></div>
-      <button class="act hot" data-play="${p.id}">▶</button><button class="act" data-shuf="${p.id}">🔀</button><button class="icon-btn" data-plmore="${p.id}">⋯</button></div>`;
+      <button class="act go" data-play="${p.id}">Lancer</button><button class="act" data-shuf="${p.id}">Mélanger</button><button class="icon-btn" data-plmore="${p.id}">⋯</button></div>`;
   }).join('');
 }
 $('#btnNewPlaylist').addEventListener('click', () => newPlaylist());
@@ -423,20 +423,25 @@ function playlistContent(p) {
   sheet(p.name + ' — toucher pour retirer', items);
 }
 
-// ---------- Platines, formes d'onde et IA (affichage en direct) ----------
+// ---------- Platines, formes d'onde, AutoMix (affichage en direct) ----------
 const canvas = $('#scope'), g = canvas.getContext('2d');
-const DECK_COL = { A: [255, 46, 136], B: [46, 230, 214] };
+const PAL = {
+  A: { low: [77, 163, 255], mid: [170, 208, 255], high: [240, 246, 255] },
+  B: { low: [255, 154, 61], mid: [255, 211, 168], high: [255, 248, 240] },
+};
+function fitCanvas(cv, ctx) {
+  const dpr = window.devicePixelRatio || 1, w = cv.clientWidth, h = cv.clientHeight;
+  if (cv.width !== Math.round(w * dpr) || cv.height !== Math.round(h * dpr)) { cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr); }
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return [w, h];
+}
 
 // Qui est sur quelle platine ?
 function deckState() {
   const res = { A: null, B: null };
-  for (const v of [engine.cur, engine.inc]) if (v) res[v.deck] = { v, t: v.track, role: v === engine.cur && !engine.inc ? 'live' : v === engine.inc ? 'in' : 'out' };
-  const nextId = state.queue[state.qi + 1];
-  const nt = state.tracks.get(nextId);
-  if (engine.cur && !engine.inc && nt) {
-    const other = engine.cur.deck === 'A' ? 'B' : 'A';
-    res[other] = { v: null, t: nt, role: 'next' };
-  }
+  for (const v of [engine.cur, engine.inc]) if (v) res[v.deck] = { v, t: v.track, role: v === engine.inc ? 'in' : engine.inc ? 'out' : 'live' };
+  const nt = state.tracks.get(state.queue[state.qi + 1]);
+  if (engine.cur && !engine.inc && nt) res[engine.cur.deck === 'A' ? 'B' : 'A'] = { v: null, t: nt, role: 'next' };
   if (!engine.cur && state.queue.length) {
     const t = state.tracks.get(state.queue[Math.max(0, state.qi)]);
     if (t) res.A = { v: null, t, role: 'ready' };
@@ -444,26 +449,67 @@ function deckState() {
   return res;
 }
 
-function renderDeckCard(letter, d) {
+const ROLE = { live: 'en lecture', in: 'entre', out: 'sort', next: 'suivant', ready: 'prêt' };
+const deckEls = {};
+function deckEl(letter) {
+  if (deckEls[letter]) return deckEls[letter];
   const el = document.getElementById('deck' + letter);
-  const tag = { live: 'EN COURS', in: 'ENTRE', out: 'SORT', next: 'SUIVANT', ready: 'PRÊT' }[d?.role] || 'VIDE';
-  el.querySelector('.deck-tag').textContent = `${letter} · ${tag}`;
-  el.querySelector('.deck-title').textContent = d ? d.t.title : '—';
-  el.querySelector('.deck-artist').textContent = d ? (d.t.artist || 'Artiste inconnu') : (letter === 'A' ? 'Importe tes musiques' : 'Ajoute une musique');
-  el.querySelector('.vinyl-label').style.setProperty('--lab', d ? `hsl(${hueOf(d.t.artist || d.t.title)} 85% 58%)` : '');
+  const o = { el, title: el.querySelector('.deck-title'), artist: el.querySelector('.deck-artist'), bpm: el.querySelector('.deck-bpm b'),
+    meta: el.querySelector('.deck-meta'), ov: el.querySelector('.overview'), ring: el.querySelector('.jog-ring') };
+  o.ovg = o.ov.getContext('2d'); o.rg = o.ring.getContext('2d');
+  return (deckEls[letter] = o);
+}
+function renderDeckCard(letter, d) {
+  const o = deckEl(letter), now = engine.now;
   const live = d && d.v;
-  el.classList.toggle('live', !!live);
-  el.classList.toggle('idle', !d);
-  el.classList.toggle('spinning', !!live && !engine.paused);
-  let b = '';
-  if (d && d.t.v === ANALYSIS_VERSION) {
-    const rate = live ? d.v.rateAt(engine.now) : (d.role === 'next' && engine.plan ? engine.plan.r : 1);
-    const bpm = d.t.bpm * rate;
-    b += `<span class="badge">${bpm.toFixed(Math.abs(rate - 1) > 0.002 ? 1 : 0)} BPM</span>` + keyBadge(d.t);
-    if (live) b += `<span class="badge time">-${fmt(d.t.duration - d.v.posAt(engine.now))}</span>`;
+  o.el.classList.toggle('on', !!live);
+  o.el.classList.toggle('empty', !d);
+  o.el.classList.toggle('spin', !!live && !engine.paused);
+  o.title.textContent = d ? d.t.title : (letter === 'A' ? 'Aucune musique' : 'Platine libre');
+  o.artist.textContent = d ? (d.t.artist || 'Artiste inconnu') : (letter === 'A' ? 'Importe tes musiques' : 'Ajoute une musique à la suite');
+  const ok = d && d.t.v === ANALYSIS_VERSION;
+  const rate = live ? d.v.rateAt(now) : (d && d.role === 'next' && engine.plan ? engine.plan.r : 1);
+  o.bpm.textContent = ok ? (d.t.bpm * rate).toFixed(1) : '—';
+  let m = '';
+  if (ok) {
+    if (d.t.camelot) m += `<span class="key" style="--h:${keyHue(d.t.camelot)}">${d.t.camelot}</span>`;
+    const pct = (rate - 1) * 100;
+    m += `<span class="pitch ${pct > 0.05 ? 'up' : pct < -0.05 ? 'down' : ''}">${pct >= 0 ? '+' : '−'}${Math.abs(pct).toFixed(1)} %</span>`;
+    if (live) m += `<span>−${fmt(d.t.duration - d.v.posAt(now))}</span>`;
+    else m += `<span>${fmt(d.t.duration)}</span>`;
   }
-  const box = el.querySelector('.deck-badges');
-  if (box.innerHTML !== b) box.innerHTML = b;
+  if (d) m += `<span class="role">${ROLE[d.role]}</span>`;
+  if (o.meta.innerHTML !== m) o.meta.innerHTML = m;
+  drawOverview(o, letter, d, now);
+  drawRing(o, letter, d, now);
+}
+function drawOverview(o, letter, d, now) {
+  const [w, h] = fitCanvas(o.ov, o.ovg); const g2 = o.ovg;
+  g2.clearRect(0, 0, w, h);
+  const peaks = d && d.t.peaks; if (!peaks) { g2.fillStyle = '#1c2330'; g2.fillRect(0, h / 2 - 1, w, 2); return; }
+  const prog = d.v ? Math.min(1, Math.max(0, d.v.posAt(now) / d.t.duration)) : (d.role === 'next' && engine.plan ? engine.plan.inPos / d.t.duration : 0);
+  const n = peaks.length, bw = w / n, col = PAL[letter].low;
+  for (let i = 0; i < n; i++) {
+    const ph = Math.max(1.5, peaks[i] / 100 * h);
+    g2.fillStyle = i / n < prog ? `rgba(${col},0.35)` : `rgba(${col},0.9)`;
+    g2.fillRect(i * bw, (h - ph) / 2, Math.max(1, bw - 1), ph);
+  }
+  // zone de mix prévue
+  if (d.v && d.v === engine.cur && engine.plan && !engine.inc) {
+    const x = d.v.posAt(engine.plan.T0) / d.t.duration * w;
+    g2.fillStyle = 'rgba(255,255,255,0.85)'; g2.fillRect(x, 0, 1.5, h);
+  }
+  g2.fillStyle = '#fff'; g2.fillRect(prog * w - 1, 0, 2, h);
+}
+function drawRing(o, letter, d, now) {
+  const g2 = o.rg, S = 120; g2.clearRect(0, 0, S, S);
+  const col = PAL[letter].low, segs = 40;
+  const prog = d && d.v ? Math.min(1, Math.max(0, d.v.posAt(now) / d.t.duration)) : 0;
+  for (let i = 0; i < segs; i++) {
+    const a0 = -Math.PI / 2 + i / segs * Math.PI * 2 + 0.03, a1 = a0 + Math.PI * 2 / segs - 0.06;
+    g2.beginPath(); g2.arc(60, 60, 56, a0, a1);
+    g2.strokeStyle = i / segs < prog ? `rgb(${col})` : '#232a37'; g2.lineWidth = 5; g2.stroke();
+  }
 }
 
 function waveCol(t, pos) {
@@ -472,120 +518,117 @@ function waveCol(t, pos) {
   if (i < 0 || i >= w.low.length) return null;
   return [w.low[i] / 255, w.mid[i] / 255, w.high[i] / 255];
 }
-
 function drawLane(y0, h, letter, d, now, cx, pps, w) {
-  const col = DECK_COL[letter];
-  const mid = y0 + h / 2;
-  g.fillStyle = `rgba(${col},0.05)`; g.fillRect(0, y0, w, h);
-  if (!d) return;
+  const pal = PAL[letter], mid = y0 + h / 2;
+  if (!d || d.t.v !== ANALYSIS_VERSION) {
+    g.fillStyle = '#1a202b'; g.fillRect(0, mid, w, 1);
+    return;
+  }
   const t = d.t;
   let posAt, startT;
   if (d.v) { posAt = x => d.v.posAt(x); startT = d.v.str ? d.v.str.when : d.v.lin.t; }
   else if (d.role === 'next' && engine.plan) { const p = engine.plan; posAt = x => p.inPos + (x - p.T0) * p.r; startT = p.T0; }
-  else return;
-  if (t.v !== ANALYSIS_VERSION) return;
-  const P = 60 / t.bpm, bar = 4 * P, ph = 32 * P;
-  let lb = null, lbar = null, lph = null;
+  else { g.fillStyle = '#1a202b'; g.fillRect(0, mid, w, 1); return; }
+  const P = 60 / t.bpm, bar = 4 * P;
+  let lb = null, lbar = null;
   for (let x = 0; x < w; x += 2) {
     const tt = now + (x - cx) / pps;
-    if (tt < startT) { lb = lbar = lph = null; continue; }
+    if (tt < startT) { lb = lbar = null; continue; }
     const pos = posAt(tt);
     const v = waveCol(t, pos);
     if (!v) continue;
-    const past = x < cx;
-    const a = past ? 0.38 : 1;
-    const hl = v[0] * h * 0.46, hm = v[1] * h * 0.40, hh = v[2] * h * 0.30;
-    g.fillStyle = `rgba(${col},${0.9 * a})`; g.fillRect(x, mid - hl, 2, hl * 2);
-    g.fillStyle = `rgba(255,200,87,${0.8 * a})`; g.fillRect(x, mid - hm, 2, hm * 2);
-    g.fillStyle = `rgba(255,255,255,${0.85 * a})`; g.fillRect(x, mid - hh, 2, hh * 2);
-    if (t.conf >= 1.25) {
-      const bi = Math.floor((pos - t.beat) / P), ba = Math.floor((pos - t.bar) / bar), pi = Math.floor((pos - t.phrase) / ph);
+    const a = x < cx ? 0.45 : 1;
+    const hl = v[0] * h * 0.47, hm = v[1] * h * 0.36, hh = v[2] * h * 0.24;
+    g.fillStyle = `rgba(${pal.low},${0.95 * a})`; g.fillRect(x, mid - hl, 2, hl * 2);
+    g.fillStyle = `rgba(${pal.mid},${0.85 * a})`; g.fillRect(x, mid - hm, 2, hm * 2);
+    g.fillStyle = `rgba(${pal.high},${0.9 * a})`; g.fillRect(x, mid - hh, 2, hh * 2);
+    if (t.conf >= 1.5) {
+      const bi = Math.floor((pos - t.beat) / P), ba = Math.floor((pos - t.bar) / bar);
       if (lb !== null && bi !== lb) {
-        const isBar = ba !== lbar, isPh = pi !== lph;
-        g.fillStyle = isPh ? 'rgba(255,255,255,0.95)' : isBar ? 'rgba(255,255,255,0.55)' : 'rgba(255,255,255,0.16)';
-        const th = isPh ? h : isBar ? h * 0.5 : h * 0.22;
-        g.fillRect(x, y0 + (isPh ? 0 : 0), isPh ? 2 : 1, isPh ? h : th * 0.5);
-        g.fillRect(x, y0 + h - (isPh ? 0 : th * 0.5), isPh ? 2 : 1, isPh ? 0 : th * 0.5);
+        const isBar = ba !== lbar;
+        g.fillStyle = isBar ? 'rgba(255,255,255,0.75)' : 'rgba(255,255,255,0.22)';
+        const th = isBar ? 7 : 4;
+        g.fillRect(x, y0, 1, th); g.fillRect(x, y0 + h - th, 1, th);
       }
-      lb = bi; lbar = ba; lph = pi;
+      lb = bi; lbar = ba;
     }
   }
-  // zone de mix prévue
   if (d.v && d.v === engine.cur && engine.plan && !engine.inc) {
-    const p = engine.plan;
-    const x0 = cx + (p.T0 - now) * pps;
-    const len = p.mixBeats ? p.mixBeats * P / d.v.rateAt(now) : (p.type === 'fade' ? 8 : 2 * P);
-    const x1 = x0 + len * pps;
-    if (x1 > 0 && x0 < w) {
-      g.fillStyle = 'rgba(139,92,246,0.22)'; g.fillRect(x0, y0, x1 - x0, h);
-      g.fillStyle = '#8b5cf6'; g.fillRect(x0, y0, 2, h);
-      g.font = '700 10px "Space Grotesk", sans-serif'; g.fillStyle = '#c4b5fd';
-      g.fillText('MIX', x0 + 5, y0 + 12);
+    const p = engine.plan, x0 = cx + (p.T0 - now) * pps;
+    const len = p.mixBeats ? p.mixBeats * P / d.v.rateAt(now) : (p.type === 'fade' ? 6 : 2 * P);
+    if (x0 < w && x0 + len * pps > 0) {
+      g.fillStyle = 'rgba(255,255,255,0.07)'; g.fillRect(x0, y0, len * pps, h);
+      g.fillStyle = 'rgba(255,255,255,0.8)'; g.fillRect(x0, y0, 1.5, h);
     }
   }
-  g.font = '700 10px "Space Grotesk", sans-serif'; g.fillStyle = `rgb(${col})`;
-  g.fillText(letter, 8, y0 + 13);
 }
-
 function drawScope() {
-  const dpr = window.devicePixelRatio || 1;
-  const w = canvas.clientWidth, h = canvas.clientHeight;
-  if (canvas.width !== Math.round(w * dpr)) { canvas.width = Math.round(w * dpr); canvas.height = Math.round(h * dpr); }
-  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const [w, h] = fitCanvas(canvas, g);
   g.clearRect(0, 0, w, h);
-  const now = engine.now;
-  const ds = deckState();
-  const cx = Math.round(w * 0.38), pps = 72, lane = (h - 6) / 2;
+  const now = engine.now, ds = deckState();
+  const cx = Math.round(w * 0.4), pps = 70, gap = 4, lane = (h - gap) / 2;
   drawLane(0, lane, 'A', ds.A, now, cx, pps, w);
-  drawLane(lane + 6, lane, 'B', ds.B, now, cx, pps, w);
-  g.fillStyle = '#fff'; g.fillRect(cx - 1, 0, 2, h);
-  g.fillStyle = 'rgba(255,255,255,0.25)'; g.fillRect(cx - 5, 0, 10, 2); g.fillRect(cx - 5, h - 2, 10, 2);
+  g.fillStyle = '#151a23'; g.fillRect(0, lane, w, gap);
+  drawLane(lane + gap, lane, 'B', ds.B, now, cx, pps, w);
+  g.fillStyle = '#ff4d5e'; g.fillRect(cx - 1, 0, 2, h);
 }
 
-const MIXNAME = { blend: 'Blend', quick: 'Mix court', echo: 'Écho', fade: 'Fondu', filter: 'Montée', loop: 'Boucle', brake: 'Frein' };
-let lastAi = '';
-function renderAI() {
-  const ai = $('#ai');
-  let st = 'en attente', text = '', chips = [], busy = false;
+const MIXNAME = { blend: 'Blend EQ', cut: 'Mix court', echo: 'Sortie en écho', fade: 'Fondu filtré', filter: 'Montée', loop: 'Boucle', brake: 'Frein' };
+let lastAm = '';
+engine.on('plan', () => { lastAm = ''; });
+function renderAutomix() {
+  let st = 'en attente', text = '', tags = [], live = false;
   const p = engine.plan, cur = engine.cur;
   const nt = state.tracks.get(state.queue[state.qi + 1]);
-  if (!state.tracks.size) text = 'Importe tes musiques dans la Bibliothèque.';
+  if (!state.tracks.size) text = 'Importe tes musiques dans la bibliothèque.';
   else if (!cur) text = state.queue.length ? 'Prêt. Appuie sur lecture pour lancer le set.' : 'Lance une playlist ou toute ta bibliothèque.';
-  else if (engine.inc) {
-    st = 'mixe'; busy = true;
-    text = `${MIXNAME[engine.lastKind] || 'Transition'} en cours → <b>${esc(engine.inc.track.title)}</b>`;
-  } else if (!nt) { st = 'à l\'écoute'; text = 'Ajoute une musique à la suite : je prépare la transition.'; }
-  else if (!p || nt.v !== ANALYSIS_VERSION) { st = 'analyse'; busy = true; text = `J'analyse « ${esc(nt.title)} »…`; }
+  else if (engine.inc) { st = 'en train de mixer'; live = true; text = `${MIXNAME[engine.lastKind] || 'Transition'} vers ${esc(engine.inc.track.title)}`; }
+  else if (!nt) { st = 'en écoute'; text = 'Ajoute une musique à la suite pour préparer la transition.'; }
+  else if (!p || nt.v !== ANALYSIS_VERSION) { st = 'analyse'; text = `Analyse de ${esc(nt.title)}…`; }
   else {
-    st = p.ready ? 'prêt' : 'calage du tempo…';
-    busy = !p.ready;
+    st = p.ready ? 'transition prête' : 'calage du tempo…';
     text = `${p.reason} dans <span class="count">${fmt(p.T0 - engine.now)}</span>`;
     const o = cur.track;
-    chips.push([`${Math.round(o.bpm)} → ${Math.round(nt.bpm)} BPM`, p.tempoOk ? 'ok' : 'no']);
-    if (o.camelot && nt.camelot) chips.push([`${o.camelot} → ${nt.camelot}`, p.keyOk ? 'ok' : 'no']);
-    if (p.tempoOk && Math.abs(p.r - 1) > 0.003) chips.push([`tempo calé ${(p.r - 1) * 100 > 0 ? '+' : ''}${((p.r - 1) * 100).toFixed(1)} %`, 'ok']);
-    chips.push([{ blend: 'échange des basses', quick: '4 mesures', echo: 'écho 3/4', fade: '8 s' }[p.type], '']);
+    tags.push([`${Math.round(o.bpm)} → ${Math.round(nt.bpm)} BPM`, p.tempoOk ? 'ok' : 'no']);
+    if (o.camelot && nt.camelot) tags.push([`${o.camelot} → ${nt.camelot}`, p.keyOk ? 'ok' : 'no']);
+    if (p.tempoOk && Math.abs(p.r - 1) > 0.003) tags.push([`tempo ${(p.r - 1) * 100 > 0 ? '+' : '−'}${Math.abs((p.r - 1) * 100).toFixed(1)} % sans changer la voix`, '']);
   }
-  const html = `${st}|${text}|${chips.map(c => c.join(':')).join(',')}`;
-  ai.classList.toggle('busy', busy);
-  if (html === lastAi) return;
-  lastAi = html;
-  $('#aiState').textContent = st;
-  $('#aiText').innerHTML = text;
-  $('#aiChips').innerHTML = chips.map(([l, c]) => `<span class="ai-chip ${c}">${l}</span>`).join('');
+  const key = `${st}|${text}|${tags.map(x => x.join(':')).join(',')}`;
+  if (key !== lastAm) {
+    lastAm = key;
+    $('#amState').textContent = st; $('#amState').classList.toggle('live', live);
+    $('#amText').innerHTML = text;
+    $('#amTags').innerHTML = tags.map(([l, c]) => `<span class="${c}">${l}</span>`).join('');
+  }
+  // crossfader
+  let x = cur && cur.deck === 'B' ? 1 : 0, fill = null;
+  if (engine.inc && engine.mix) {
+    const m = engine.mix, k = Math.min(1, Math.max(0, (engine.now - m.t0) / Math.max(0.1, m.t1 - m.t0)));
+    x = m.from === 'A' ? k : 1 - k;
+  }
+  const f = $('#fader');
+  f.style.setProperty('--x', x.toFixed(3));
+  f.classList.toggle('live', live);
+  const fl = f.querySelector('.fader-fill');
+  fl.style.left = `${Math.min(x, cur && cur.deck === 'B' ? 1 : 0) * 100}%`;
+  fl.style.width = `${Math.abs(x - (engine.mix && engine.inc ? (engine.mix.from === 'A' ? 0 : 1) : x)) * 100}%`;
 }
 
 function renderDeck() {
-  const ds = deckState();
-  renderDeckCard('A', ds.A); renderDeckCard('B', ds.B);
   const playing = !!engine.cur;
   $('#btnPlayPause').disabled = !playing && !state.queue.length;
   $('#btnPlayPause').classList.toggle('playing', playing && !engine.paused);
   $('#btnRemix').disabled = !playing;
-  renderAI();
 }
 setInterval(renderDeck, 250);
-(function loop() { if (document.visibilityState === 'visible') drawScope(); requestAnimationFrame(loop); })();
+(function loop() {
+  if (document.visibilityState === 'visible') {
+    const ds = deckState();
+    renderDeckCard('A', ds.A); renderDeckCard('B', ds.B);
+    drawScope(); renderAutomix();
+  }
+  requestAnimationFrame(loop);
+})();
 
 function renderAll() { renderDeck(); renderQueue(); renderLibrary(); renderPlaylists(); }
 
@@ -597,9 +640,9 @@ $('#btnPlayPause').addEventListener('click', () => {
   renderDeck();
 });
 $('#remixStyles').addEventListener('click', e => {
-  const b = e.target.closest('.chip'); if (!b) return;
+  const b = e.target.closest('#remixStyles button'); if (!b) return;
   state.style = b.dataset.style; store.set('dj-style', state.style);
-  document.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c === b));
+  document.querySelectorAll('#remixStyles button').forEach(c => c.classList.toggle('on', c === b));
 });
 document.querySelector('.pads').addEventListener('click', e => {
   const b = e.target.closest('.pad'); if (!b || !engine.playing) return;
@@ -621,7 +664,6 @@ $('#modeSeg').addEventListener('click', e => {
   setMode(b.dataset.mode);
   toast({ full: 'Morceaux en entier', club: 'Mode Club : ~2 min 30 par morceau', express: 'Mode Express : ~1 min 15 par morceau' }[b.dataset.mode]);
 });
-engine.on('plan', () => { lastAi = ''; });
 
 function switchTab(tab) {
   state.tab = tab;
@@ -640,7 +682,7 @@ splash && splash.addEventListener('click', hideSplash);
 (async function boot() {
   state.style = store.get('dj-style', 'auto');
   setMode(store.get('dj-mode', 'club'));
-  document.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c.dataset.style === state.style));
+  document.querySelectorAll('#remixStyles button').forEach(c => c.classList.toggle('on', c.dataset.style === state.style));
   try {
     const [tracks, pls] = await Promise.all([db.allTracks(), db.allPlaylists()]);
     tracks.forEach(t => state.tracks.set(t.id, t));

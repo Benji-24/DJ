@@ -1,5 +1,5 @@
 // Garde l'appli disponible même sans réseau (en soirée, en club…)
-const CACHE = 'dj-v4';
+const CACHE = 'dj-v5';
 const FILES = ['./', 'index.html', 'css/style.css', 'js/app.js', 'js/engine.js', 'js/analyze.js', 'js/db.js', 'js/convert.js', 'js/ffworker.js', 'js/brain.js', 'js/stretch-worker.js',
   'manifest.webmanifest', 'icons/icon-180.png', 'icons/icon-192.png', 'icons/icon-512.png'];
 self.addEventListener('install', e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(FILES))); self.skipWaiting(); });
