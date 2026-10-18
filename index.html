@@ -15,9 +15,16 @@
 <link rel="stylesheet" href="css/style.css">
 </head>
 <body>
+<div id="splash" aria-hidden="true">
+  <div class="sp-glow"></div>
+  <div class="sp-disc"><div class="sp-groove"></div><div class="sp-label">DJ</div></div>
+  <div class="sp-eq"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+  <div class="sp-title">DJ</div>
+  <div class="sp-by">by_ben</div>
+</div>
 <div id="app">
   <header class="top">
-    <h1>DJ<span class="dot">●</span></h1>
+    <h1>DJ<span class="dot">●</span><span class="by">by_ben</span></h1>
     <button id="btnPlayPause" class="round" aria-label="Lecture / pause" disabled>
       <svg viewBox="0 0 24 24" class="i-play"><path d="M7 4l13 8-13 8z"/></svg>
       <svg viewBox="0 0 24 24" class="i-pause"><path d="M6 4h4v16H6zM14 4h4v16h-4z"/></svg>
@@ -27,7 +34,7 @@
   <section class="deck" id="deck">
     <div class="now-label">En cours</div>
     <div class="now-title" id="nowTitle">Aucune musique</div>
-    <div class="now-meta" id="nowMeta">Importe tes MP3 dans la Bibliothèque pour commencer</div>
+    <div class="now-meta" id="nowMeta">Importe tes musiques (MP3, MKV…) dans la Bibliothèque pour commencer</div>
     <canvas id="wave" height="64"></canvas>
     <div class="next-line" id="nextLine"></div>
   </section>
@@ -62,7 +69,7 @@
 
   <section class="panel hidden" id="tab-library">
     <label class="import">
-      <input type="file" id="fileInput" accept="audio/*,video/*,.mp3,.m4a,.aac,.wav,.mkv,.mka,.webm,.mov,.mp4,.avi" multiple>
+      <input type="file" id="fileInput" multiple>
       <span>+ Importer des musiques</span>
     </label>
     <div class="import-status" id="importStatus"></div>

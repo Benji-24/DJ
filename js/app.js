@@ -280,7 +280,7 @@ function renderLibrary() {
   const el = $('#libList');
   const all = [...state.tracks.values()].sort((a, b) => b.added - a.added);
   if (!all.length) {
-    el.innerHTML = `<div class="empty">Aucune musique pour l'instant.<br>Touche <b>Importer des musiques</b> et choisis tes MP3 dans l'app Fichiers.</div>`;
+    el.innerHTML = `<div class="empty">Aucune musique pour l'instant.<br>Touche <b>Importer des musiques</b> et choisis tes MP3 ou MKV dans l'app Fichiers.</div>`;
     return;
   }
   const s = state.search.toLowerCase();
@@ -420,7 +420,7 @@ function renderDeck() {
     const bpm = Math.round(t.bpm * v.rate);
     $('#nowMeta').textContent = `${t.artist || 'Artiste inconnu'} · ${bpm} BPM · ${fmt(v.posAt(engine.now))} / ${fmt(t.duration)}`;
   } else {
-    $('#nowMeta').textContent = state.tracks.size ? 'Lance une playlist ou touche une musique' : 'Importe tes MP3 dans la Bibliothèque pour commencer';
+    $('#nowMeta').textContent = state.tracks.size ? 'Lance une playlist ou touche une musique' : 'Importe tes musiques (MP3, MKV…) dans la Bibliothèque pour commencer';
   }
   const nextId = state.queue[state.qi + 1];
   const nt = state.tracks.get(nextId);
@@ -470,6 +470,12 @@ function switchTab(tab) {
 document.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('button'); if (b) switchTab(b.dataset.tab); });
 
 // ---------- Démarrage ----------
+// Animation d'ouverture (touche l'écran pour la passer)
+const splash = document.getElementById('splash');
+const splashStart = Date.now();
+function hideSplash() { if (!splash || splash.classList.contains('out')) return; splash.classList.add('out'); setTimeout(() => splash.remove(), 600); }
+splash && splash.addEventListener('click', hideSplash);
+
 (async function boot() {
   state.style = store.get('dj-style', 'auto');
   document.querySelectorAll('.chip').forEach(c => c.classList.toggle('on', c.dataset.style === state.style));
@@ -480,5 +486,6 @@ document.querySelector('.tabs').addEventListener('click', e => { const b = e.tar
   } catch (e) { toast('Stockage indisponible'); }
   if (!state.tracks.size) switchTab('library');
   renderAll();
+  setTimeout(hideSplash, Math.max(0, 2300 - (Date.now() - splashStart)));
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });
 })();
