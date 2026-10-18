@@ -1,0 +1,27 @@
+name: Ajouter ffmpeg (lecture des MKV)
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/vendor-ffmpeg.yml']
+permissions:
+  contents: write
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - run: |
+          mkdir -p /tmp/ff && cd /tmp/ff && npm init -y >/dev/null
+          npm i @ffmpeg/core@0.12.10 @ffmpeg/ffmpeg@0.12.15
+          cd $GITHUB_WORKSPACE && rm -rf vendor/ffmpeg && mkdir -p vendor/ffmpeg/core vendor/ffmpeg/lib
+          cp /tmp/ff/node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.js vendor/ffmpeg/core/
+          cp /tmp/ff/node_modules/@ffmpeg/core/dist/umd/ffmpeg-core.wasm vendor/ffmpeg/core/
+          cp /tmp/ff/node_modules/@ffmpeg/ffmpeg/dist/esm/*.js vendor/ffmpeg/lib/
+          cp /tmp/ff/node_modules/@ffmpeg/core/LICENSE vendor/ffmpeg/LICENSE-core 2>/dev/null || true
+          ls -la vendor/ffmpeg/*
+      - run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898732+github-actions[bot]@users.noreply.github.com"
+          git add vendor && git commit -m "Ajout de ffmpeg.wasm (lecture des MKV)" && git push || echo "rien à changer"
