@@ -1,0 +1,249 @@
+{
+ "pieces": [
+  {
+   "file": "htdemucs_p00.onnx",
+   "inputs": [
+    "mag",
+    "mix"
+   ],
+   "outputs": [
+    "/Div_1_output_0",
+    "/Unsqueeze_1_output_0",
+    "/Unsqueeze_2_output_0",
+    "/Unsqueeze_3_output_0",
+    "/Unsqueeze_output_0",
+    "/encoder.0/dconv/Add_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p01.onnx",
+   "inputs": [
+    "/encoder.0/dconv/Add_output_0"
+   ],
+   "outputs": [
+    "/Add_2_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p02.onnx",
+   "inputs": [
+    "/Add_2_output_0"
+   ],
+   "outputs": [
+    "/encoder.1/Mul_2_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p03.onnx",
+   "inputs": [
+    "/encoder.1/Mul_2_output_0"
+   ],
+   "outputs": [
+    "/crosstransformer/Reshape_5_output_0",
+    "/encoder.2/Mul_2_output_0",
+    "/encoder.3/Mul_2_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p04.onnx",
+   "inputs": [
+    "/Div_1_output_0"
+   ],
+   "outputs": [
+    "/tencoder.0/dconv/Add_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p05.onnx",
+   "inputs": [
+    "/tencoder.0/dconv/Add_output_0"
+   ],
+   "outputs": [
+    "/tencoder.0/Mul_2_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p06.onnx",
+   "inputs": [
+    "/tencoder.0/Mul_2_output_0"
+   ],
+   "outputs": [
+    "/tencoder.1/Mul_2_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p07.onnx",
+   "inputs": [
+    "/tencoder.1/Mul_2_output_0"
+   ],
+   "outputs": [
+    "/crosstransformer/Transpose_6_output_0",
+    "/tencoder.2/Mul_2_output_0",
+    "/tencoder.3/Mul_2_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p08.onnx",
+   "inputs": [
+    "/crosstransformer/Reshape_5_output_0",
+    "/crosstransformer/Transpose_6_output_0"
+   ],
+   "outputs": [
+    "/crosstransformer/layers.0/norm_out/Transpose_1_output_0",
+    "/crosstransformer/layers_t.0/norm_out/Transpose_1_output_0",
+    "Transpose_token_200_out0",
+    "Transpose_token_206_out0"
+   ]
+  },
+  {
+   "file": "htdemucs_p09.onnx",
+   "inputs": [
+    "/crosstransformer/layers.0/norm_out/Transpose_1_output_0",
+    "/crosstransformer/layers_t.0/norm_out/Transpose_1_output_0",
+    "Transpose_token_200_out0",
+    "Transpose_token_206_out0"
+   ],
+   "outputs": [
+    "/crosstransformer/layers.1/norm_out/Transpose_1_output_0",
+    "/crosstransformer/layers_t.1/norm_out/Transpose_1_output_0",
+    "Transpose_token_203_out0",
+    "Transpose_token_209_out0"
+   ]
+  },
+  {
+   "file": "htdemucs_p10.onnx",
+   "inputs": [
+    "/crosstransformer/layers.1/norm_out/Transpose_1_output_0",
+    "/crosstransformer/layers_t.1/norm_out/Transpose_1_output_0",
+    "Transpose_token_203_out0",
+    "Transpose_token_209_out0"
+   ],
+   "outputs": [
+    "/crosstransformer/layers.2/norm_out/Transpose_1_output_0",
+    "/crosstransformer/layers_t.2/norm_out/Transpose_1_output_0",
+    "Transpose_token_212_out0",
+    "Transpose_token_218_out0"
+   ]
+  },
+  {
+   "file": "htdemucs_p11.onnx",
+   "inputs": [
+    "/crosstransformer/layers.2/norm_out/Transpose_1_output_0",
+    "/crosstransformer/layers_t.2/norm_out/Transpose_1_output_0",
+    "Transpose_token_212_out0",
+    "Transpose_token_218_out0"
+   ],
+   "outputs": [
+    "/crosstransformer/layers.3/norm_out/Transpose_1_output_0",
+    "/crosstransformer/layers_t.3/norm_out/Transpose_1_output_0",
+    "Transpose_token_215_out0",
+    "Transpose_token_221_out0"
+   ]
+  },
+  {
+   "file": "htdemucs_p12.onnx",
+   "inputs": [
+    "/crosstransformer/layers.3/norm_out/Transpose_1_output_0",
+    "/crosstransformer/layers_t.3/norm_out/Transpose_1_output_0",
+    "Transpose_token_215_out0",
+    "Transpose_token_221_out0"
+   ],
+   "outputs": [
+    "/Reshape_2_output_0",
+    "/crosstransformer/layers_t.4/norm_out/Add_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p13.onnx",
+   "inputs": [
+    "/Reshape_2_output_0",
+    "/crosstransformer/layers_t.4/norm_out/Add_output_0",
+    "/encoder.3/Mul_2_output_0",
+    "/tencoder.3/Mul_2_output_0"
+   ],
+   "outputs": [
+    "/decoder.0/Mul_2_output_0",
+    "/tdecoder.0/Mul_2_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p14.onnx",
+   "inputs": [
+    "/decoder.0/Mul_2_output_0",
+    "/encoder.2/Mul_2_output_0",
+    "/tdecoder.0/Mul_2_output_0",
+    "/tencoder.2/Mul_2_output_0"
+   ],
+   "outputs": [
+    "/decoder.1/Mul_2_output_0",
+    "/tdecoder.1/Mul_2_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p15.onnx",
+   "inputs": [
+    "/Add_2_output_0",
+    "/decoder.1/Mul_2_output_0",
+    "/encoder.1/Mul_2_output_0"
+   ],
+   "outputs": [
+    "/decoder.3/Add_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p16.onnx",
+   "inputs": [
+    "/tdecoder.1/Mul_2_output_0",
+    "/tencoder.0/Mul_2_output_0",
+    "/tencoder.1/Mul_2_output_0"
+   ],
+   "outputs": [
+    "/tdecoder.3/Add_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p17.onnx",
+   "inputs": [
+    "/decoder.3/Add_output_0"
+   ],
+   "outputs": [
+    "/decoder.3/dconv/Add_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p18.onnx",
+   "inputs": [
+    "/Unsqueeze_1_output_0",
+    "/Unsqueeze_output_0",
+    "/decoder.3/dconv/Add_output_0"
+   ],
+   "outputs": [
+    "x"
+   ]
+  },
+  {
+   "file": "htdemucs_p19.onnx",
+   "inputs": [
+    "/tdecoder.3/Add_output_0"
+   ],
+   "outputs": [
+    "/tdecoder.3/dconv/Add_output_0"
+   ]
+  },
+  {
+   "file": "htdemucs_p20.onnx",
+   "inputs": [
+    "/Unsqueeze_2_output_0",
+    "/Unsqueeze_3_output_0",
+    "/tdecoder.3/dconv/Add_output_0"
+   ],
+   "outputs": [
+    "xt"
+   ]
+  }
+ ],
+ "outputs": {
+  "freq": "x",
+  "time": "xt"
+ }
+}
