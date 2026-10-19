@@ -1,0 +1,40 @@
+name: Ajouter l'IA de séparation des pistes
+on:
+  workflow_dispatch:
+  push:
+    paths: ['.github/workflows/vendor-demucs.yml']
+permissions:
+  contents: write
+jobs:
+  vendor:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - name: Modèle htdemucs (fp16, découpé)
+        run: |
+          mkdir -p vendor/demucs
+          base=https://huggingface.co/monteslu/htdemucs-web-onnx/resolve/main
+          curl -fsSL -o vendor/demucs/htdemucs_split_manifest.json $base/htdemucs_split_manifest.json
+          for i in $(seq -w 0 20); do curl -fsSL -o vendor/demucs/htdemucs_p$i.onnx $base/htdemucs_p$i.onnx; done
+          curl -fsSL -o vendor/demucs/README-model.md $base/README.md
+          ls -la vendor/demucs
+      - name: onnxruntime-web + demucs-web
+        run: |
+          mkdir -p /tmp/o && cd /tmp/o && npm init -y >/dev/null
+          npm i onnxruntime-web demucs-web
+          ls node_modules/onnxruntime-web/dist | tee /tmp/ortlist.txt
+          cd $GITHUB_WORKSPACE && rm -rf vendor/ort vendor/demucs-web && mkdir -p vendor/ort vendor/demucs-web
+          D=/tmp/o/node_modules/onnxruntime-web/dist
+          for f in $D/ort.webgpu.min.mjs $D/ort.webgpu.bundle.min.mjs $D/ort.wasm.min.mjs $D/ort.min.mjs $D/ort-wasm-simd-threaded.jsep.mjs $D/ort-wasm-simd-threaded.jsep.wasm $D/ort-wasm-simd-threaded.mjs $D/ort-wasm-simd-threaded.wasm $D/ort-wasm-simd-threaded.asyncify.mjs $D/ort-wasm-simd-threaded.asyncify.wasm; do [ -f "$f" ] && cp "$f" vendor/ort/; done
+          cp /tmp/o/node_modules/onnxruntime-web/package.json vendor/ort/package.json
+          cp /tmp/o/node_modules/demucs-web/src/*.js vendor/demucs-web/
+          cp /tmp/o/node_modules/demucs-web/LICENSE vendor/demucs-web/ || true
+          cp /tmp/ortlist.txt vendor/ort/dist-list.txt
+          ls -la vendor/ort vendor/demucs-web
+      - name: Enregistrer
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898732+github-actions[bot]@users.noreply.github.com"
+          git add vendor && git commit -m "Ajout de l'IA de séparation des pistes (htdemucs) et d'onnxruntime-web" && git push || echo "rien à changer"
