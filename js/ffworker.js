@@ -23,7 +23,26 @@ function run(args) {
   return r;
 }
 
+// Encodage d'une piste séparée en AAC (m4a) : stéréo entrelacée Float32 → fichier compact
+async function encode({ id, pcm, sr, kbps, fmt }) {
+  self.postMessage({ id, type: 'status', s: core ? 'ready' : 'loading' });
+  await load();
+  core.FS.writeFile('/enc.raw', new Uint8Array(pcm.buffer, pcm.byteOffset, pcm.byteLength));
+  const mp3 = fmt === 'mp3', out = mp3 ? '/enc.mp3' : '/enc.m4a';
+  const codec = mp3 ? ['-c:a', 'libmp3lame'] : ['-c:a', 'aac'];
+  const r = run(['-f', 'f32le', '-ar', String(sr), '-ac', '2', '-i', '/enc.raw', ...codec, '-b:a', (kbps || 192) + 'k', '-y', out]);
+  core.FS.unlink('/enc.raw');
+  if (r !== 0) throw new Error('encode');
+  const bytes = core.FS.readFile(out);
+  core.FS.unlink(out);
+  self.postMessage({ id, type: 'done', bytes, mime: mp3 ? 'audio/mpeg' : 'audio/mp4' }, [bytes.buffer]);
+}
+
 self.onmessage = async ({ data }) => {
+  if (data.type === 'encode') {
+    try { await encode(data); } catch (e) { self.postMessage({ id: data.id, type: 'error', msg: String(e && e.message || e) }); }
+    return;
+  }
   const { id, file } = data;
   let mounted = false;
   try {

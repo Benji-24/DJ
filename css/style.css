@@ -179,3 +179,6 @@ button:focus-visible, .search:focus-visible { outline: 2px solid var(--a); outli
 .sp-by { font-size: 15px; color: var(--sub); margin-top: 4px; animation: fadeup .5s .85s both; }
 @keyframes fadeup { from { opacity: 0; transform: translateY(10px); } }
 @media (prefers-reduced-motion: reduce) { .sp-ring, .sp-plate, .sp-name, .sp-by, .deck.spin .jog-plate { animation: none; } .sp-ring { --p: 360deg; } }
+
+.row .a .stem { color: var(--mute); }
+.row .a .stem.ok { color: var(--go); }

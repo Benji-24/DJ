@@ -1,7 +1,7 @@
 // Moteur DJ : deux platines virtuelles + table de mixage (EQ 3 bandes, filtres),
 // mix calé sur la grille (temps, mesures, phrases), tempo ajusté SANS changer la hauteur,
 // remix propres (sans clic ni saturation) et effets en direct.
-import { planTransition, remixInPos, beatLen, tempoRatio } from './brain.js';
+import { planTransition, remixInPos, beatLen, tempoRatio, vocal } from './brain.js';
 
 const XF = 0.04;   // fondu de raccord étirement → original (s)
 const MICRO = 0.012; // micro-fondu anti-clic (s)
@@ -36,12 +36,24 @@ function softClipCurve() {
   return c;
 }
 
+// Une platine. `media` = { mix } (morceau entier) ou { vox, drums, rest } (pistes séparées par l'IA).
+// Chaque piste a son propre volume et son filtre, puis passe dans l'EQ 3 bandes de la platine.
 class Voice {
-  constructor(engine, track, buffer) {
+  constructor(engine, track, media) {
     const c = engine.ctx;
-    this.e = engine; this.ctx = c; this.track = track; this.buffer = buffer;
+    if (media instanceof AudioBuffer) media = { mix: media };
+    this.e = engine; this.ctx = c; this.track = track; this.media = media;
+    this.layers = Object.keys(media);
+    this.stems = !!media.vox;
+    this.buffer = media[this.layers[0]];
     this.input = c.createGain();
-    // EQ 3 bandes comme sur une table de mixage DJ
+    this.lin_ = {}; this.lg = {}; this.lhp = {}; this.lsend = {};
+    for (const L of this.layers) {
+      const i = c.createGain(), g = c.createGain(), hp = c.createBiquadFilter(), sd = c.createGain();
+      hp.type = 'highpass'; hp.frequency.value = 10; hp.Q.value = 0.7; sd.gain.value = 0;
+      i.connect(g); g.connect(hp); hp.connect(this.input); g.connect(sd); sd.connect(engine.delayIn);
+      this.lin_[L] = i; this.lg[L] = g; this.lhp[L] = hp; this.lsend[L] = sd;
+    }
     this.low = c.createBiquadFilter(); this.low.type = 'lowshelf'; this.low.frequency.value = 250;
     this.mid = c.createBiquadFilter(); this.mid.type = 'peaking'; this.mid.frequency.value = 1000; this.mid.Q.value = 0.7;
     this.high = c.createBiquadFilter(); this.high.type = 'highshelf'; this.high.frequency.value = 4000;
@@ -55,13 +67,14 @@ class Voice {
     this.out.connect(this.norm); this.norm.connect(engine.bus);
     this.lp.connect(this.send); this.send.connect(engine.delayIn);
     this.period = 60 / track.bpm;
-    this.src = null; this.srcs = []; this.loopSrc = null;
+    this.main = []; this.srcs = []; this.loops = [];
     this.str = null; this.lin = { t: 0, p: 0, rate: 1 };
     this.startPos = 0; this.endT = Infinity;
   }
+  get duration() { return this.buffer.duration; }
   mk(buffer, rate = 1, dest = this.input) {
     const s = this.ctx.createBufferSource();
-    s.buffer = buffer; s.playbackRate.value = rate; s.connect(dest);
+    s.buffer = buffer; s.playbackRate.value = rate; if (dest) s.connect(dest);
     this.srcs.push(s);
     return s;
   }
@@ -69,38 +82,42 @@ class Voice {
     this.input.gain.setValueAtTime(0, Math.max(this.ctx.currentTime, when - 0.001));
     this.input.gain.linearRampToValueAtTime(1, when + MICRO);
   }
-  // coupe proprement à l'instant t (micro-fondu)
   cutAt(t) {
     this.input.gain.setValueAtTime(1, t - MICRO);
     this.input.gain.linearRampToValueAtTime(0, t);
     this.stop(t + 0.02);
   }
+  startMain(when, pos, rate) {
+    this.main = this.layers.map(L => { const s = this.mk(this.media[L], rate, this.lin_[L]); s.start(when, Math.max(0, pos)); return s; });
+  }
   startLinear(when, pos, rate = 1, fade = true) {
-    pos = Math.max(0, Math.min(pos, this.buffer.duration - 0.5));
+    pos = Math.max(0, Math.min(pos, this.duration - 0.5));
     this.startPos = pos;
     this.lin = { t: when, p: pos, rate };
     if (fade) this.fadeIn(when);
-    this.src = this.mk(this.buffer, rate);
-    this.src.start(when, pos);
-    this.endT = when + (this.buffer.duration - pos) / rate;
+    this.startMain(when, pos, rate);
+    this.endT = when + (this.duration - pos) / rate;
   }
   // Début calé : version étirée (même hauteur) puis raccord invisible avec l'original
   startStretched(when, pos, st) {
     this.startPos = pos;
-    const c = this.ctx;
-    const gS = c.createGain(), gO = c.createGain();
-    gS.connect(this.input); gO.connect(this.input);
-    const s1 = this.mk(st.buffer, 1, gS);
-    s1.start(when);
-    const seam = when + st.seamT, p2 = pos + st.seamPos;
-    gS.gain.setValueAtTime(1, seam - XF); gS.gain.linearRampToValueAtTime(0, seam + XF);
-    gO.gain.setValueAtTime(0, c.currentTime); gO.gain.setValueAtTime(0, seam - XF); gO.gain.linearRampToValueAtTime(1, seam + XF);
-    s1.stop(seam + XF + 0.02);
-    this.src = this.mk(this.buffer, 1, gO);
-    this.src.start(seam - XF, Math.max(0, p2 - XF));
+    const c = this.ctx, seam = when + st.seamT, p2 = pos + st.seamPos;
+    this.main = [];
+    for (const L of this.layers) {
+      const gS = c.createGain(), gO = c.createGain();
+      gS.connect(this.lin_[L]); gO.connect(this.lin_[L]);
+      const s1 = this.mk(st.bufs[L], 1, gS);
+      s1.start(when);
+      gS.gain.setValueAtTime(1, seam - XF); gS.gain.linearRampToValueAtTime(0, seam + XF);
+      gO.gain.setValueAtTime(0, c.currentTime); gO.gain.setValueAtTime(0, seam - XF); gO.gain.linearRampToValueAtTime(1, seam + XF);
+      s1.stop(seam + XF + 0.02);
+      const s2 = this.mk(this.media[L], 1, gO);
+      s2.start(seam - XF, Math.max(0, p2 - XF));
+      this.main.push(s2);
+    }
     this.str = { when, pos, r0: st.r0, hold: st.hold, glide: st.glide, seam };
     this.lin = { t: seam, p: p2, rate: 1 };
-    this.endT = seam + (this.buffer.duration - p2);
+    this.endT = seam + (this.duration - p2);
   }
   pin(u) {
     const { r0, hold, glide } = this.str;
@@ -139,12 +156,12 @@ class Voice {
     const p = this.posAt(when);
     this.str = null;
     this.lin = { t: when, p, rate: r };
-    if (this.src) this.src.playbackRate.setValueAtTime(r, when);
-    this.endT = when + (this.buffer.duration - p) / r;
+    this.main.forEach(s => s.playbackRate.setValueAtTime(r, when));
+    this.endT = when + (this.duration - p) / r;
   }
   // morceau de son en boucle, avec micro-fondus (aucun clic à la jonction)
-  loopBuffer(p0, len) {
-    const b = this.buffer, sr = b.sampleRate, n = Math.max(64, Math.round(len * sr)), a = Math.floor(p0 * sr);
+  loopBuffer(p0, len, L = this.layers[0]) {
+    const b = this.media[L], sr = b.sampleRate, n = Math.max(64, Math.round(len * sr)), a = Math.floor(p0 * sr);
     const out = this.ctx.createBuffer(b.numberOfChannels, n, sr);
     const f = Math.min(Math.floor(n / 4), Math.round(0.003 * sr));
     for (let ch = 0; ch < b.numberOfChannels; ch++) {
@@ -154,11 +171,22 @@ class Voice {
     }
     return out;
   }
+  // boucle d'une ou plusieurs pistes (toutes par défaut)
+  startLoop(t, p0, len, rate, layers = this.layers, stopAt) {
+    const out = [];
+    for (const L of layers) {
+      const s = this.mk(this.loopBuffer(p0, len, L), rate, this.lin_[L]);
+      s.loop = true; s.start(t); if (stopAt) s.stop(stopAt);
+      out.push(s);
+    }
+    return out;
+  }
+  stopMain(t) { this.main.forEach(s => this.stopSrc(s, t)); }
   stopSrc(s, when) { try { s && s.stop(when); } catch (e) { } }
   stop(when) { this.srcs.forEach(s => this.stopSrc(s, when)); }
   dispose() {
     this.stop(this.ctx.currentTime);
-    try { this.out.disconnect(); this.send.disconnect(); this.norm.disconnect(); } catch (e) { }
+    try { this.out.disconnect(); this.send.disconnect(); this.norm.disconnect(); for (const L of this.layers) this.lsend[L].disconnect(); } catch (e) { }
   }
 }
 
@@ -215,6 +243,7 @@ export class Engine {
     this.events = [];
     if (this.cur) this.cur.dispose();
     if (this.inc) this.inc.dispose();
+    if (this.olds) { this.olds.forEach(o => o.dispose()); this.olds.clear(); }
     this.cur = this.inc = this.next = null; this.committed = false; this.plan = null;
     this.fx = { filter: false, bass: false, loop: false };
   }
@@ -240,29 +269,39 @@ export class Engine {
   // ---------- Préparation de la transition ----------
   makePlan() {
     const cur = this.cur, nx = this.next, now = this.now;
-    const p = planTransition(cur.track, nx.track, { pos: cur.posAt(now), playedFrom: cur.startPos, mode: this.mode });
+    const nMedia = nx.buffer instanceof AudioBuffer ? { mix: nx.buffer } : nx.buffer;
+    const nTrack = { ...nx.track, stems: nMedia.vox ? nx.track.stems : undefined };
+    const oTrack = { ...cur.track, stems: cur.stems ? cur.track.stems : undefined };
+    const p = planTransition(oTrack, nTrack, { pos: cur.posAt(now), playedFrom: cur.startPos, mode: this.mode });
     p.T0 = cur.timeOfPos(p.outPos);
     p.ready = true;
-    const overlap = p.type === 'blend' || p.type === 'cut';
+    const overlap = p.type === 'blend' || p.type === 'cut' || p.type === 'stems';
     if (overlap && Math.abs(p.r - 1) > 0.003) {
       p.ready = false;
       const hold = p.mixBeats * beatLen(cur.track);
       const glide = 16 * beatLen(nx.track);
-      const sr = nx.buffer.sampleRate;
+      const names = Object.keys(nMedia), first = nMedia[names[0]], sr = first.sampleRate;
       const need = (p.r * hold + (p.r + 1) / 2 * glide + 1.2) * sr;
-      const a = Math.floor(p.inPos * sr), b = Math.min(nx.buffer.length, a + Math.ceil(need));
-      const L = nx.buffer.getChannelData(0).slice(a, b);
-      const R = (nx.buffer.numberOfChannels > 1 ? nx.buffer.getChannelData(1) : nx.buffer.getChannelData(0)).slice(a, b);
+      const a = Math.floor(p.inPos * sr), b = Math.min(first.length, a + Math.ceil(need));
+      const layers = names.map(n => {
+        const bf = nMedia[n];
+        return { L: bf.getChannelData(0).slice(a, b), R: (bf.numberOfChannels > 1 ? bf.getChannelData(1) : bf.getChannelData(0)).slice(a, b) };
+      });
       const id = ++this.jobId;
       this.jobs.set(id, res => {
         if (this.plan !== p || res.error) return;
-        const buf = this.ctx.createBuffer(2, res.L.length, sr);
-        buf.copyToChannel(res.L, 0); buf.copyToChannel(res.R, 1);
-        p.st = { buffer: buf, seamT: res.seamT, seamPos: res.seamPos, r0: p.r, hold, glide };
+        const bufs = {};
+        names.forEach((n, i) => {
+          const bf = this.ctx.createBuffer(2, res.layers[i].L.length, sr);
+          bf.copyToChannel(res.layers[i].L, 0); bf.copyToChannel(res.layers[i].R, 1);
+          bufs[n] = bf;
+        });
+        p.st = { bufs, seamT: res.seamT, seamPos: res.seamPos, r0: p.r, hold, glide };
         p.ready = true;
         this.emit('plan', p);
       });
-      this.stretcher.postMessage({ id, L, R, sr, r0: p.r, hold, glide }, [L.buffer, R.buffer]);
+      const tr = []; layers.forEach(l => tr.push(l.L.buffer, l.R.buffer));
+      this.stretcher.postMessage({ id, layers, sr, r0: p.r, hold, glide }, tr);
     }
     this.plan = p;
     this.emit('plan', p);
@@ -278,18 +317,80 @@ export class Engine {
     const T0 = p.T0;
     const B = out.beatSec(T0);
     let swapAt, endAt;
-
-    if (p.type === 'blend' || p.type === 'cut') {
-      // Mix calé façon DJ : le suivant entre sans basses et médiums réduits,
-      // échange des basses au milieu, puis le précédent s'efface.
-      const L = p.mixBeats * B, half = L / 2;
+    const startIn = (fade) => {
       if (p.st) v.startStretched(T0, p.inPos, p.st);
       else {
-        v.startLinear(T0, p.inPos, p.r, false);
+        v.startLinear(T0, p.inPos, p.r, fade);
         if (Math.abs(p.r - 1) > 0.003) {
+          const L = p.mixBeats * B;
           for (let i = 1; i <= 16; i++) this.at(T0 + L + i * 0.5, () => { if (this.cur === v && !v.str) v.setRate(p.r + (1 - p.r) * i / 16, this.now + 0.03); });
         }
       }
+    };
+
+    if (p.type === 'stems' && out.stems && v.stems) {
+      // ----- Mix par pistes (comme les DJ avec les « stems ») -----
+      // 8 mesures : la batterie du suivant arrive (sans grosse caisse) sous le morceau en cours.
+      // Échange au milieu : grosse caisse et basse passent au suivant d'un coup, sur le « 1 ».
+      // Jamais deux voix en même temps. Tonalités incompatibles : aucune mélodie ne se superpose.
+      const L = p.mixBeats * B, M = T0 + L / 2, BAR = 4 * B;
+      startIn(false);
+      v.out.gain.value = 1;
+      for (const n of v.layers) v.lg[n].gain.setValueAtTime(0, now);
+      // batterie du suivant : montée sur 4 mesures, sans le bas
+      v.lhp.drums.frequency.setValueAtTime(220, now);
+      powerFade(v.lg.drums.gain, 'in', T0, 4 * BAR, 0.9);
+      v.lg.drums.gain.setValueAtTime(0.9, M - 0.01);
+      v.lg.drums.gain.linearRampToValueAtTime(1, M + B);
+      v.lhp.drums.frequency.setValueAtTime(220, M - 0.03);
+      v.lhp.drums.frequency.exponentialRampToValueAtTime(10, M);
+      // le morceau en cours perd sa grosse caisse et sa basse au même instant
+      out.lhp.drums.frequency.setValueAtTime(out.lhp.drums.frequency.value, M - 0.03);
+      out.lhp.drums.frequency.exponentialRampToValueAtTime(220, M);
+      out.lhp.rest.frequency.setValueAtTime(out.lhp.rest.frequency.value, M - 0.03);
+      out.lhp.rest.frequency.exponentialRampToValueAtTime(200, M);
+      // sa batterie s'efface sur la 2e moitié
+      out.lg.drums.gain.setValueAtTime(1, M + BAR);
+      powerFade(out.lg.drums.gain, 'out', M + BAR, 3 * BAR);
+      // voix du morceau en cours : finit sa phrase, s'arrête au plus tard à l'échange (petit écho)
+      out.lg.vox.gain.setValueAtTime(1, M - B);
+      out.lg.vox.gain.linearRampToValueAtTime(0, M);
+      out.lsend.vox.gain.setValueAtTime(0, now);
+      out.lsend.vox.gain.setValueAtTime(0.55, M - B);
+      out.lsend.vox.gain.setValueAtTime(0, M);
+      this.echoSetup(B, now);
+      this.echoRelease(M + 2 * BAR);
+      if (p.keyOk) {
+        // tonalités compatibles : la musique du suivant se glisse dessous (aigus d'abord)
+        v.lhp.rest.frequency.setValueAtTime(350, now);
+        v.lg.rest.gain.setValueAtTime(0, M - 2 * BAR);
+        v.lg.rest.gain.linearRampToValueAtTime(0.7, M - 0.01);
+        v.lhp.rest.frequency.setValueAtTime(350, M - 0.03);
+        v.lhp.rest.frequency.exponentialRampToValueAtTime(10, M);
+        v.lg.rest.gain.linearRampToValueAtTime(1, M + B);
+        out.lg.rest.gain.setValueAtTime(1, M);
+        powerFade(out.lg.rest.gain, 'out', M, 4 * BAR);
+      } else {
+        // pont de batterie : la musique du morceau en cours s'éteint avant l'échange
+        out.lg.rest.gain.setValueAtTime(1, M - 2 * BAR);
+        powerFade(out.lg.rest.gain, 'out', M - 2 * BAR, 2 * BAR);
+        out.lsend.rest.gain.setValueAtTime(0, now);
+        out.lsend.rest.gain.setValueAtTime(0.35, M - B);
+        out.lsend.rest.gain.setValueAtTime(0, M);
+        v.lg.rest.gain.setValueAtTime(0, M - 0.01);
+        v.lg.rest.gain.linearRampToValueAtTime(1, M + 2 * B);
+      }
+      // voix du suivant : seulement après l'échange
+      v.lg.vox.gain.setValueAtTime(0, M);
+      v.lg.vox.gain.linearRampToValueAtTime(1, M + B / 2);
+      out.stop(T0 + L + 0.05);
+      swapAt = M; endAt = T0 + L;
+    } else if (p.type === 'blend' || p.type === 'cut' || p.type === 'stems') {
+      // Mix calé façon DJ : le suivant entre sans basses et médiums réduits,
+      // échange des basses au milieu, puis le précédent s'efface.
+      const mb = p.type === 'stems' ? 32 : p.mixBeats;
+      const L = mb * B, half = L / 2;
+      startIn(false);
       const midCut = p.type === 'cut' ? -9 : -6;
       v.out.gain.setValueAtTime(0, now);
       powerFade(v.out.gain, 'in', T0, half, 0.92);
@@ -317,9 +418,15 @@ export class Engine {
       swapAt = T0 + half; endAt = T0 + L;
     } else if (p.type === 'echo') {
       this.echoSetup(B, now);
-      out.send.gain.setValueAtTime(0, now);
-      out.send.gain.setValueAtTime(0.8, T0);
-      out.send.gain.setValueAtTime(0, T0 + B);
+      if (out.stems) {
+        // écho sur la voix et la musique, la batterie s'arrête net sur le temps
+        out.lsend.vox.gain.setValueAtTime(0, now); out.lsend.vox.gain.setValueAtTime(0.8, T0); out.lsend.vox.gain.setValueAtTime(0, T0 + B);
+        out.lsend.rest.gain.setValueAtTime(0, now); out.lsend.rest.gain.setValueAtTime(0.5, T0); out.lsend.rest.gain.setValueAtTime(0, T0 + B);
+      } else {
+        out.send.gain.setValueAtTime(0, now);
+        out.send.gain.setValueAtTime(0.8, T0);
+        out.send.gain.setValueAtTime(0, T0 + B);
+      }
       out.out.gain.setValueAtTime(1, T0 + B * 0.5);
       out.out.gain.linearRampToValueAtTime(0, T0 + B);
       out.stop(T0 + B + 0.05);
@@ -343,7 +450,7 @@ export class Engine {
       out.stop(T0 + D + 0.05);
       swapAt = T0 + D / 2; endAt = T0 + D;
     }
-    this.commit(v, out, swapAt, endAt + 0.5, p.type, p.type === 'echo' ? T0 : T0, endAt);
+    this.commit(v, out, swapAt, endAt + 0.5, p.type, T0, endAt);
   }
 
   echoSetup(B, t) {
@@ -365,7 +472,8 @@ export class Engine {
       this.fx = { filter: false, bass: false, loop: false };
       this.emit('change', v.track);
     });
-    this.at(cleanupAt, () => old.dispose());
+    (this.olds ||= new Set()).add(old);
+    this.at(cleanupAt, () => { old.dispose(); this.olds.delete(old); });
   }
 
   // ---------- Remix : passer tout de suite à la suivante, comme un DJ ----------
@@ -386,7 +494,22 @@ export class Engine {
     const t1 = out.nextBeatTime(now + 0.06);
     let tIn;
 
-    if (type === 'echo') {
+    if (type === 'echo' && out.stems) {
+      // la batterie et la basse s'arrêtent net sur le temps, la voix part en écho,
+      // le morceau suivant tombe sur la mesure d'après
+      const tb = out.nextBarTime(t1 + 3 * B - 0.05);
+      this.echoSetup(B, now);
+      out.lsend.vox.gain.setValueAtTime(0, now); out.lsend.vox.gain.setValueAtTime(0.85, t1); out.lsend.vox.gain.setValueAtTime(0, t1 + B);
+      const sung = vocal(out.track, out.posAt(t1) - 1, out.posAt(t1) + 1) > 0.15;
+      out.lsend.rest.gain.setValueAtTime(0, now); out.lsend.rest.gain.setValueAtTime(sung ? 0.4 : 0.85, t1); out.lsend.rest.gain.setValueAtTime(0, t1 + (sung ? B / 2 : B));
+      out.lg.drums.gain.setValueAtTime(1, t1 - MICRO); out.lg.drums.gain.linearRampToValueAtTime(0, t1);
+      out.lhp.rest.frequency.setValueAtTime(10, t1 - 0.02); out.lhp.rest.frequency.exponentialRampToValueAtTime(400, t1);
+      out.lg.rest.gain.setValueAtTime(1, t1); out.lg.rest.gain.linearRampToValueAtTime(0, t1 + B);
+      out.lg.vox.gain.setValueAtTime(1, t1 + B * 0.6); out.lg.vox.gain.linearRampToValueAtTime(0, t1 + B);
+      out.stop(t1 + B + 0.05);
+      tIn = Math.max(tb, t1 + 2 * B);
+      this.echoRelease(tIn + 4 * B);
+    } else if (type === 'echo') {
       // écho sur 1 temps puis le suivant tombe sur la mesure
       this.echoSetup(B, now);
       out.send.gain.setValueAtTime(0, now);
@@ -405,22 +528,30 @@ export class Engine {
       out.hp.Q.setValueAtTime(0.9, t1);
       out.low.gain.setValueAtTime(out.low.gain.value, t1);
       out.low.gain.linearRampToValueAtTime(KILL, tEnd - B);
+      if (out.stems) { // la voix s'efface pendant la montée, la batterie reste pour la tension
+        out.lg.vox.gain.setValueAtTime(1, t1); out.lg.vox.gain.linearRampToValueAtTime(0, t1 + 2 * B);
+      }
       this.riser(t1, tEnd);
       out.cutAt(tEnd);
       tIn = tEnd;
     } else if (type === 'loop') {
       // boucle qui se resserre (1 temps → ½ → ¼), sans clic
+      // avec les pistes : roulement de batterie seule, la musique s'éloigne
       const p0 = out.posAt(t1), per = out.period, rate = out.rateAt(t1);
       out.input.gain.setValueAtTime(1, t1);
       out.srcs.forEach(s => out.stopSrc(s, t1 + 0.004));
+      const lay = out.stems ? ['drums', 'rest'] : out.layers;
       let t = t1;
       for (const [len, rep] of [[1, 2], [0.5, 2], [0.25, 4]]) {
-        const s = out.mk(out.loopBuffer(p0, len * per), rate);
-        s.loop = true;
-        s.start(t);
         const dur = len * rep * B;
-        s.stop(t + dur);
+        out.startLoop(t, p0, len * per, rate, lay, t + dur);
         t += dur;
+      }
+      if (out.stems) {
+        this.echoSetup(B, now);
+        out.lsend.vox.gain.setValueAtTime(0, now); out.lsend.vox.gain.setValueAtTime(0.7, t1 - B); out.lsend.vox.gain.setValueAtTime(0, t1);
+        out.lg.rest.gain.setValueAtTime(1, t1); out.lg.rest.gain.linearRampToValueAtTime(0.25, t1 + 2 * B);
+        this.echoRelease(t + 2 * B);
       }
       out.hp.frequency.setValueAtTime(20, t1);
       out.hp.frequency.exponentialRampToValueAtTime(600, t);
@@ -486,20 +617,21 @@ export class Engine {
     if (on) {
       if (this.fx.loop || v.stretching) return false;
       const t1 = v.nextBeatTime(now + 0.03), p0 = v.posAt(t1);
-      const s = v.mk(v.loopBuffer(p0, 4 * v.period), v.lin.rate);
-      s.loop = true;
-      v.stopSrc(v.src, t1 + 0.004);
-      s.start(t1);
-      v.loopSrc = s; this.fx.loop = true;
+      v.stopMain(t1 + 0.004);
+      v.loops = v.startLoop(t1, p0, 4 * v.period, v.lin.rate);
+      this.fx.loop = true;
     } else {
       if (!this.fx.loop) return false;
-      const t = now + 0.03;
-      v.stopSrc(v.loopSrc, t + 0.004); v.loopSrc = null;
-      const s = v.mk(v.buffer, v.lin.rate);
-      const g = this.ctx.createGain(); s.disconnect(); s.connect(g); g.connect(v.input);
-      g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 0.006);
-      s.start(t, Math.max(0, v.posAt(t)));
-      v.src = s; this.fx.loop = false;
+      const t = now + 0.03, pos = Math.max(0, v.posAt(t));
+      v.loops.forEach(s => v.stopSrc(s, t + 0.004)); v.loops = [];
+      v.main = v.layers.map(L => {
+        const s = v.mk(v.media[L], v.lin.rate, null);
+        const g = this.ctx.createGain(); s.disconnect(); s.connect(g); g.connect(v.lin_[L]);
+        g.gain.setValueAtTime(0, t); g.gain.linearRampToValueAtTime(1, t + 0.006);
+        s.start(t, pos);
+        return s;
+      });
+      this.fx.loop = false;
     }
     return true;
   }

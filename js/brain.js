@@ -15,6 +15,14 @@ export function energy(t, a, b) {
   return i1 > i0 ? s / (i1 - i0) / 255 : 0;
 }
 
+// présence de voix (0..1) d'après la piste voix séparée
+export function vocal(t, a, b) {
+  const n = t.vox; if (!n || !n.length) return 0;
+  const i0 = Math.max(0, Math.floor(a * 10)), i1 = Math.min(n.length, Math.ceil(b * 10));
+  let s = 0; for (let i = i0; i < i1; i++) s += n[i];
+  return i1 > i0 ? s / (i1 - i0) / 255 : 0;
+}
+
 // toutes les positions de début de phrase (8 mesures) dans [a, b]
 function phrases(t, a, b) {
   const L = phraseLen(t), out = [];
@@ -61,9 +69,11 @@ export function planTransition(out, inn, { pos, playedFrom, mode = 'club', lead 
   }
   const introE = energy(inn, inPos, inPos + 8 * barLen(inn));
 
-  let type = !steady ? 'fade' : !tempoOk ? 'echo' : 'blend';
-  const mixLen = (ty, beats) => ty === 'blend' || ty === 'cut' ? beats * B : ty === 'echo' ? 2 * BAR : 6;
+  const stems = !!(out.stems === 'ready' && inn.stems === 'ready');
+  let type = !steady ? 'fade' : !tempoOk ? 'echo' : stems ? 'stems' : 'blend';
+  const mixLen = (ty, beats) => ty === 'blend' || ty === 'cut' || ty === 'stems' ? beats * B : ty === 'echo' ? 2 * BAR : 6;
   const beatsFor = (ty, q) => {
+    if (ty === 'stems') return 64; // 16 mesures : 8 de batterie seule, 8 de mélange
     if (ty === 'cut') return 8;
     if (ty !== 'blend') return 0;
     const oe = energy(out, q, q + 32 * B);
@@ -92,7 +102,10 @@ export function planTransition(out, inn, { pos, playedFrom, mode = 'club', lead 
     }
     let best = Infinity;
     for (const q of pool) {
-      const e = energy(out, q, q + mixLen(type, beatsFor(type, q)));
+      const L = mixLen(type, beatsFor(type, q));
+      let e = energy(out, q, q + L);
+      // éviter de couper une phrase chantée : voix du morceau qui sort en fin de mix
+      if (type === 'stems') e = 0.5 * e + 1.2 * vocal(out, q + L / 2, q + L) + 0.3 * vocal(out, q + L, q + L + 4 * B);
       const dist = mode === 'full' ? (cands[cands.length - 1] - q) / PH : Math.abs(q - target) / PH;
       const sc = e + 0.12 * dist;
       if (sc < best) { best = sc; outPos = q; }
@@ -100,7 +113,7 @@ export function planTransition(out, inn, { pos, playedFrom, mode = 'club', lead 
   }
   // trop tard pour une phrase : prochaine mesure, mix plus court
   if (outPos === null) {
-    if (type === 'blend') type = 'cut';
+    if (type === 'blend' || type === 'stems') type = 'cut';
     const q = steady ? nextBar(out, pos + Math.min(lead, 2.5)) : pos + 2.5;
     if (type === 'cut' && q + 8 * B > out.end + B) type = 'echo';
     outPos = q;
@@ -108,6 +121,7 @@ export function planTransition(out, inn, { pos, playedFrom, mode = 'club', lead 
   const mixBeats = beatsFor(type, outPos);
 
   const reason = {
+    stems: keyOk ? 'Mix par pistes · tonalités compatibles' : 'Pont de batterie · tonalités différentes',
     blend: mixBeats === 32 ? 'Blend long · 8 mesures' : 'Blend EQ · 4 mesures',
     cut: keyOk ? 'Mix court · intro chargée' : 'Mix court · tonalités différentes',
     echo: 'Sortie en écho · tempos éloignés',

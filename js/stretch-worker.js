@@ -5,17 +5,21 @@
 // Carte de tempo : vitesse r0 pendant `hold` secondes (calage sur l'autre morceau),
 // puis retour progressif à la vitesse normale (1) pendant `glide` secondes.
 
+// Plusieurs pistes (voix, batterie, reste) : les positions de raccord sont calculées
+// sur le mélange puis appliquées à l'identique à chaque piste (aucun déphasage entre elles).
 self.onmessage = ({ data }) => {
-  const { id, L, R, sr, r0, hold, glide } = data;
+  const { id, sr, r0, hold, glide } = data;
+  const layers = data.layers || [{ L: data.L, R: data.R }];
   try {
-    const out = stretch(L, R, sr, r0, hold, glide);
-    self.postMessage({ id, ...out }, [out.L.buffer, out.R.buffer]);
+    const out = stretch(layers, sr, r0, hold, glide);
+    const tr = []; out.layers.forEach(l => tr.push(l.L.buffer, l.R.buffer));
+    self.postMessage({ id, ...out }, tr);
   } catch (e) {
     self.postMessage({ id, error: String(e) });
   }
 };
 
-function stretch(L, R, sr, r0, hold, glide) {
+function stretch(layers, sr, r0, hold, glide) {
   const N = 2048, Hs = N / 4, SEARCH = 128; // recouvrement 75 % : temps nets
   const seamT = hold + glide;
   const T = seamT + 0.15; // un peu de marge pour le fondu de raccord
@@ -26,12 +30,12 @@ function stretch(L, R, sr, r0, hold, glide) {
     return r0 * hold + r0 * u + (1 - r0) * u * u / (2 * glide || 1) + Math.max(0, t - hold - glide);
   };
   const outLen = Math.ceil(T * sr) + N;
-  const oL = new Float32Array(outLen), oR = new Float32Array(outLen);
+  const outs = layers.map(() => ({ L: new Float32Array(outLen), R: new Float32Array(outLen) }));
   const win = new Float32Array(N);
   for (let i = 0; i < N; i++) win[i] = (0.5 - 0.5 * Math.cos(2 * Math.PI * i / N)) * 0.5;
-  const inLen = L.length;
+  const inLen = layers[0].L.length;
   const M = new Float32Array(inLen);
-  for (let i = 0; i < inLen; i++) M[i] = L[i] + R[i];
+  for (const ly of layers) for (let i = 0; i < inLen; i++) M[i] += ly.L[i] + ly.R[i];
 
   let prev = 0; // position (échantillons) du morceau précédent dans l'entrée
   const frames = Math.ceil(T * sr / Hs) + 1;
@@ -59,13 +63,16 @@ function stretch(L, R, sr, r0, hold, glide) {
     if (pos < 0) pos = 0;
     if (pos + N >= inLen) break;
     const o = k * Hs;
-    for (let i = 0; i < N && o + i < outLen; i++) {
-      const w = win[i];
-      oL[o + i] += w * L[pos + i];
-      oR[o + i] += w * R[pos + i];
+    for (let j = 0; j < layers.length; j++) {
+      const { L, R } = layers[j], oL = outs[j].L, oR = outs[j].R;
+      for (let i = 0; i < N && o + i < outLen; i++) {
+        const w = win[i];
+        oL[o + i] += w * L[pos + i];
+        oR[o + i] += w * R[pos + i];
+      }
     }
     prev = pos;
   }
   const n = Math.ceil(T * sr);
-  return { L: oL.slice(0, n), R: oR.slice(0, n), seamT, seamPos: pin(seamT) };
+  return { layers: outs.map(o => ({ L: o.L.slice(0, n), R: o.R.slice(0, n) })), seamT, seamPos: pin(seamT) };
 }

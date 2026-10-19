@@ -1,7 +1,9 @@
 import { db } from './db.js';
-import { analyzeBuffer, ANALYSIS_VERSION } from './analyze.js';
+import { analyzeBuffer, ANALYSIS_VERSION, camelotCompat } from './analyze.js';
+import { tempoRatio } from './brain.js';
 import { Engine } from './engine.js';
 import { isVideo, extractAudio } from './convert.js';
+import { makeStems, pickMode, usesMainThread } from './stems.js';
 
 const engine = new Engine();
 window.__engine = engine; // utile pour les tests
@@ -60,17 +62,94 @@ const cache = new Map();
 async function getBuffer(id) {
   if (cache.has(id)) return cache.get(id);
   const p = (async () => {
+    engine.init();
+    const t = state.tracks.get(id);
+    if (t && t.stems === 'ready') {
+      try {
+        if (t.v !== ANALYSIS_VERSION) {
+          const ob = await db.getBlob(id);
+          await upgradeAnalysis(id, await engine.ctx.decodeAudioData(await ob.arrayBuffer()));
+        }
+        return await loadStems(t);
+      } catch (e) { console.error('pistes illisibles', e); }
+    }
     const blob = await db.getBlob(id);
     if (!blob) throw new Error('Fichier introuvable');
-    const ab = await blob.arrayBuffer();
-    engine.init();
-    const buf = await engine.ctx.decodeAudioData(ab);
+    const buf = await engine.ctx.decodeAudioData(await blob.arrayBuffer());
     await upgradeAnalysis(id, buf);
-    return buf;
+    return { mix: buf };
   })();
   cache.set(id, p);
   try { return await p; } catch (e) { cache.delete(id); throw e; }
 }
+// Pistes séparées → buffers prêts à jouer (décalage d'encodage corrigé)
+async function loadStems(t) {
+  const media = {};
+  for (const name of ['vox', 'drums', 'rest']) {
+    const b = await db.getBlob(`${t.id}:${name}`);
+    if (!b) throw new Error('piste manquante ' + name);
+    let buf = await engine.ctx.decodeAudioData(await b.arrayBuffer());
+    const sh = Math.round((t.stemOfs || 0) * buf.sampleRate);
+    if (sh) {
+      const nb = engine.ctx.createBuffer(buf.numberOfChannels, buf.length, buf.sampleRate);
+      for (let c = 0; c < buf.numberOfChannels; c++) {
+        const src = buf.getChannelData(c), dst = nb.getChannelData(c);
+        if (sh > 0) dst.set(src.subarray(sh)); else dst.set(src.subarray(0, buf.length + sh), -sh);
+      }
+      buf = nb;
+    }
+    media[name] = buf;
+  }
+  return media;
+}
+
+// ---------- Séparation des pistes par l'IA (en arrière-plan, une fois par morceau) ----------
+state.stemJob = null;
+let stemRunning = false;
+async function stemQueue() {
+  if (stemRunning) return;
+  stemRunning = true;
+  try {
+    for (;;) {
+      const t = [...state.tracks.values()].sort((a, b) => a.added - b.added).find(x => !x.stems && x.v === ANALYSIS_VERSION);
+      if (!t) break;
+      // sur la page (sans travailleur) on évite de séparer pendant un set : ça pourrait saccader
+      await pickMode();
+      while (usesMainThread() && engine.playing) await new Promise(r => setTimeout(r, 3000));
+      state.stemJob = { id: t.id, phase: 'decode', progress: 0 };
+      renderLibrary();
+      try {
+        const blob = await db.getBlob(t.id);
+        const res = await makeStems(blob, {
+          loud: 0.16 / (t.gain || 1),
+          onProgress: e => { state.stemJob = { id: t.id, ...e }; },
+        });
+        for (const [name, b] of Object.entries(res.blobs)) await db.putBlob(`${t.id}:${name}`, b);
+        Object.assign(t, { stems: 'ready', vox: res.vox, drm: res.drm, stemOfs: res.stemOfs, stemBackend: res.backend });
+        await db.putTrack(t);
+        cache.delete(t.id);
+        if (state.queue[state.qi + 1] === t.id && !engine.committed && (!engine.plan || engine.plan.T0 - engine.now > 20)) prepareNext(true);
+      } catch (e) {
+        console.error('séparation', e);
+        t.stems = 'failed'; t.stemError = String(e && e.message || e);
+        await db.putTrack(t);
+      }
+      state.stemJob = null;
+      renderLibrary(); renderQueue();
+    }
+  } finally { stemRunning = false; }
+}
+function stemLabel(t) {
+  const j = state.stemJob;
+  if (j && j.id === t.id) {
+    const P = Math.round((j.progress || 0) * 100);
+    return { model: `IA : téléchargement ${P} %`, decode: 'IA : préparation', separate: `IA : séparation ${P} %`, encode: 'IA : compression', check: 'IA : vérification' }[j.phase] || 'IA…';
+  }
+  if (t.stems === 'ready') return 'pistes IA';
+  if (t.stems === 'failed') return 'pistes indisponibles';
+  return 'IA en attente';
+}
+
 // Ancienne analyse ? on la refait avec le nouveau moteur
 async function upgradeAnalysis(id, buf) {
   const t = state.tracks.get(id);
@@ -125,11 +204,11 @@ async function playIndex(i) {
 }
 
 let preparing = null;
-async function prepareNext() {
+async function prepareNext(force) {
   if (engine.committed) return;
   const id = state.queue[state.qi + 1];
   if (!id) { engine.setNext(null); return; }
-  if (engine.next && engine.next.track.id === id) return;
+  if (!force && engine.next && engine.next.track.id === id) return;
   engine.setNext(null);
   preparing = id;
   try {
@@ -194,10 +273,35 @@ async function doRemix() {
   renderQueue();
 }
 
+// Ordre DJ : enchaîne les morceaux qui vont ensemble (tempo proche, tonalités compatibles)
+// et fait monter l'énergie progressivement, comme un DJ qui prépare son set.
+function djOrder(ids, startId) {
+  const T = id => state.tracks.get(id);
+  const nrgOf = t => { const n = t.nrg; if (!n || !n.length) return 0.5; let s = 0; for (const x of n) s += x; return s / n.length / 255; };
+  const left = new Set(ids);
+  let cur = startId && left.has(startId) ? startId : [...left].sort((a, b) => nrgOf(T(a)) - nrgOf(T(b)))[Math.floor(Math.random() * Math.min(3, left.size))];
+  const out = [cur]; left.delete(cur);
+  while (left.size) {
+    const a = T(cur); let best = null, bs = -Infinity;
+    for (const id of left) {
+      const b = T(id);
+      const r = tempoRatio(a.bpm, b.bpm), dt = Math.abs(r - 1);
+      let sc = dt <= 0.03 ? 3 : dt <= 0.08 ? 2 : dt <= 0.15 ? 0.5 : -1;
+      if (camelotCompat(a.camelot, b.camelot)) sc += 2;
+      const de = nrgOf(b) - nrgOf(a); sc += de >= 0 && de < 0.15 ? 0.8 : de < 0 ? -0.3 : 0;
+      if (b.stems === 'ready' && a.stems === 'ready') sc += 0.3;
+      sc += Math.random() * 0.6;
+      if (sc > bs) { bs = sc; best = id; }
+    }
+    out.push(best); left.delete(best); cur = best;
+  }
+  return out;
+}
+
 function startSet(ids, shuffle) {
   ids = ids.filter(id => state.tracks.has(id));
   if (!ids.length) return toast('Cette liste est vide');
-  if (shuffle) for (let i = ids.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [ids[i], ids[j]] = [ids[j], ids[i]]; }
+  if (shuffle) ids = djOrder(ids, engine.playing ? engine.cur.track.id : null).filter(id => !engine.playing || id !== engine.cur.track.id);
   if (engine.playing) {
     const keep = state.queue.slice(0, insertPos());
     const cur = new Set(keep.slice(state.qi));
@@ -254,7 +358,8 @@ async function importFiles(files) {
       toast(e && e.message === 'noaudio' ? 'Pas de son dans : ' + f.name : 'Fichier non lisible : ' + f.name);
     }
   }
-  st.textContent = ok ? `${ok} musique${ok > 1 ? 's' : ''} ajoutée${ok > 1 ? 's' : ''} ✔︎` : '';
+  st.textContent = ok ? `${ok} musique${ok > 1 ? 's' : ''} ajoutée${ok > 1 ? 's' : ''} ✔︎ L'IA sépare maintenant les pistes en arrière-plan.` : '';
+  stemQueue();
   setTimeout(() => { if (st.textContent.includes('✔︎')) st.textContent = ''; }, 4000);
 }
 $('#fileInput').addEventListener('change', e => {
@@ -271,7 +376,7 @@ function trackRow(t, extra = '', cls = '') {
   const pending = t.v !== ANALYSIS_VERSION;
   return `<div class="row ${cls}" data-id="${t.id}">
     <div class="art" style="--art:${artOf(t)}"></div>
-    <div class="info"><div class="t">${esc(t.title)}</div><div class="a">${esc(t.artist || 'Artiste inconnu')} · ${fmt(t.duration)}</div></div>
+    <div class="info"><div class="t">${esc(t.title)}</div><div class="a">${esc(t.artist || 'Artiste inconnu')}, ${fmt(t.duration)} <span class="stem ${t.stems === 'ready' ? 'ok' : ''}" data-stem="${t.id}">${stemLabel(t)}</span></div></div>
     <div class="meta">${pending ? '…' : Math.round(t.bpm)}${pending || !t.camelot ? '' : `<span class="key" style="--h:${keyHue(t.camelot)}">${t.camelot}</span>`}</div>${extra}</div>`;
 }
 
@@ -323,7 +428,7 @@ function renderLibrary() {
   const s = state.search.toLowerCase();
   const list = s ? all.filter(t => (t.title + ' ' + t.artist).toLowerCase().includes(s)) : all;
   el.innerHTML = `<div class="lib-actions">
-      <button class="act go" data-all="0">Tout lancer</button><button class="act" data-all="1">Mélanger</button>
+      <button class="act go" data-all="0">Tout lancer</button><button class="act" data-all="1">Ordre DJ</button>
       <span class="count">${all.length} titres</span></div>` +
     list.map(t => trackRow(t, `<button class="act" data-next="${t.id}">Ensuite</button><button class="icon-btn" data-more="${t.id}" aria-label="Options">⋯</button>`)).join('');
 }
@@ -360,6 +465,7 @@ async function deleteTrack(id) {
   if (cur) return toast('Impossible : ce morceau est en train de jouer');
   if (!confirm('Supprimer « ' + state.tracks.get(id).title + ' » ?')) return;
   await db.deleteTrack(id);
+  for (const n of ['vox', 'drums', 'rest']) { try { await db.deleteTrack(`${id}:${n}`); } catch (e) { } }
   state.tracks.delete(id);
   for (let i = state.queue.length - 1; i > state.qi; i--) if (state.queue[i] === id) state.queue.splice(i, 1);
   for (const p of state.playlists) if (p.ids.includes(id)) { p.ids = p.ids.filter(x => x !== id); await db.putPlaylist(p); }
@@ -393,7 +499,7 @@ function renderPlaylists() {
   el.innerHTML = state.playlists.map(p => {
     const n = p.ids.filter(id => state.tracks.has(id)).length;
     return `<div class="row" data-pl="${p.id}"><div class="info"><div class="t">${esc(p.name)}</div><div class="a">${n} titre${n > 1 ? 's' : ''}</div></div>
-      <button class="act go" data-play="${p.id}">Lancer</button><button class="act" data-shuf="${p.id}">Mélanger</button><button class="icon-btn" data-plmore="${p.id}">⋯</button></div>`;
+      <button class="act go" data-play="${p.id}">Lancer</button><button class="act" data-shuf="${p.id}">Ordre DJ</button><button class="icon-btn" data-plmore="${p.id}">⋯</button></div>`;
   }).join('');
 }
 $('#btnNewPlaylist').addEventListener('click', () => newPlaylist());
@@ -408,7 +514,7 @@ $('#plList').addEventListener('click', e => {
 function playlistMenu(p) {
   sheet(p.name, [
     { label: '▶ Lancer dans l\'ordre', fn: () => startSet([...p.ids], false) },
-    { label: '🔀 Lancer mélangé', fn: () => startSet([...p.ids], true) },
+    { label: 'Lancer dans l\'ordre DJ (tempos et tonalités qui s\'enchaînent)', fn: () => startSet([...p.ids], true) },
     { label: '☰ Voir / retirer des titres', fn: () => playlistContent(p) },
     { label: '✎ Renommer', fn: async () => { const n = prompt('Nouveau nom', p.name); if (n && n.trim()) { p.name = n.trim(); await db.putPlaylist(p); renderPlaylists(); } } },
     { label: '🗑 Supprimer la playlist', cls: 'danger', fn: async () => { if (confirm('Supprimer « ' + p.name + ' » ? (les musiques restent dans la bibliothèque)')) { await db.deletePlaylist(p.id); state.playlists = state.playlists.filter(x => x !== p); renderPlaylists(); } } },
@@ -474,7 +580,7 @@ function renderDeckCard(letter, d) {
   if (ok) {
     if (d.t.camelot) m += `<span class="key" style="--h:${keyHue(d.t.camelot)}">${d.t.camelot}</span>`;
     const pct = (rate - 1) * 100;
-    m += `<span class="pitch ${pct > 0.05 ? 'up' : pct < -0.05 ? 'down' : ''}">${pct >= 0 ? '+' : '−'}${Math.abs(pct).toFixed(1)} %</span>`;
+    m += `<span class="pitch ${pct > 0.05 ? 'up' : pct < -0.05 ? 'down' : ''}">${Math.abs(pct) < 0.05 ? '±' : pct > 0 ? '+' : '−'}${Math.abs(pct).toFixed(1)} %</span>`;
     if (live) m += `<span>−${fmt(d.t.duration - d.v.posAt(now))}</span>`;
     else m += `<span>${fmt(d.t.duration)}</span>`;
   }
@@ -573,7 +679,7 @@ function drawScope() {
   g.fillStyle = '#ff4d5e'; g.fillRect(cx - 1, 0, 2, h);
 }
 
-const MIXNAME = { blend: 'Blend EQ', cut: 'Mix court', echo: 'Sortie en écho', fade: 'Fondu filtré', filter: 'Montée', loop: 'Boucle', brake: 'Frein' };
+const MIXNAME = { stems: 'Mix par pistes', blend: 'Blend EQ', cut: 'Mix court', echo: 'Sortie en écho', fade: 'Fondu filtré', filter: 'Montée', loop: 'Boucle', brake: 'Frein' };
 let lastAm = '';
 engine.on('plan', () => { lastAm = ''; });
 function renderAutomix() {
@@ -591,6 +697,8 @@ function renderAutomix() {
     const o = cur.track;
     tags.push([`${Math.round(o.bpm)} → ${Math.round(nt.bpm)} BPM`, p.tempoOk ? 'ok' : 'no']);
     if (o.camelot && nt.camelot) tags.push([`${o.camelot} → ${nt.camelot}`, p.keyOk ? 'ok' : 'no']);
+    if (p.type === 'stems') tags.push(['voix, batterie et musique séparées', 'ok']);
+    else if (cur.track.stems !== 'ready' || nt.stems !== 'ready') tags.push(['pistes IA pas encore prêtes', '']);
     if (p.tempoOk && Math.abs(p.r - 1) > 0.003) tags.push([`tempo ${(p.r - 1) * 100 > 0 ? '+' : '−'}${Math.abs((p.r - 1) * 100).toFixed(1)} % sans changer la voix`, '']);
   }
   const key = `${st}|${text}|${tags.map(x => x.join(':')).join(',')}`;
@@ -621,6 +729,13 @@ function renderDeck() {
   $('#btnRemix').disabled = !playing;
 }
 setInterval(renderDeck, 250);
+let lastStemTxt = '';
+setInterval(() => {
+  const j = state.stemJob; if (!j) return;
+  const t = state.tracks.get(j.id); if (!t) return;
+  const txt = stemLabel(t); if (txt === lastStemTxt) return; lastStemTxt = txt;
+  document.querySelectorAll(`[data-stem="${j.id}"]`).forEach(el => { el.textContent = txt; });
+}, 400);
 (function loop() {
   if (document.visibilityState === 'visible') {
     const ds = deckState();
@@ -691,6 +806,6 @@ splash && splash.addEventListener('click', hideSplash);
   if (!state.tracks.size) switchTab('library');
   renderAll();
   setTimeout(hideSplash, Math.max(0, 2300 - (Date.now() - splashStart)));
-  setTimeout(migrateLibrary, 2600);
+  setTimeout(async () => { await migrateLibrary(); stemQueue(); }, 2600);
   if ('serviceWorker' in navigator) navigator.serviceWorker.register('sw.js').catch(() => { });
 })();

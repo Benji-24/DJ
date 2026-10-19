@@ -36,3 +36,14 @@ export function extractAudio(file, onProgress) {
   chain = p.catch(() => { });
   return p;
 }
+
+// Encodage AAC d'une piste (pcm = Float32Array stéréo entrelacée)
+export function encodeAAC(pcm, sr, onProgress, kbps = 192, fmt = 'aac') {
+  const p = chain.then(() => new Promise((resolve, reject) => {
+    const id = ++seq;
+    jobs.set(id, { resolve, reject, onProgress });
+    getWorker().postMessage({ id, type: 'encode', pcm, sr, kbps, fmt }, [pcm.buffer]);
+  }));
+  chain = p.catch(() => { });
+  return p;
+}
